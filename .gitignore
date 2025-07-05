@@ -1,5 +1,12 @@
 .env
 __pycache__/
 *.pyc
+*.pyo
+*.pyd
+*.log
 photos/
 temp/
+.DS_Store
+venv/
+poetry.lock
+pyproject.toml
