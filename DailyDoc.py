@@ -24,7 +24,7 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-API_TOKEN = os.getenv("8067244331:AAHJD1wCAj6MM4pBt6XwlXqGKXRlf90rSik")
+API_TOKEN = os.getenv("API_TOKEN")
 if not API_TOKEN:
     raise ValueError("API_TOKEN environment variable is not set")
 
