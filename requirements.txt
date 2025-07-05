@@ -1,5 +1,5 @@
-aiogram==3.1.0b0
-Pillow==10.1.0
+aiogram==3.0.0b7
+Pillow==9.5.0
 python-docx==0.8.11
 python-dotenv==1.0.0
-aiohttp==3.9.3
+aiohttp==3.9.3"
