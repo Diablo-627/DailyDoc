@@ -214,25 +214,10 @@ async def help_handler(message: Message):
     help_text = (
         "Доступные команды:\n"
         "/start - Начать заполнение отчета\n"
-        "/generate - Сгенерировать отчет\n"
         "/reset - Сбросить текущую сессию\n"
         "/help - Показать эту справку"
     )
     await message.answer(help_text)
-
-@router.message(Command("generate"))
-async def generate_handler(message: Message, state: FSMContext):
-    """Обработчик команды /generate"""
-    chat_id = message.chat.id
-    session = get_or_create_session(chat_id)
-    
-    with session["lock"]:
-        if not session["photos"]:
-            await message.answer("Нет фото для генерации отчета.")
-            return
-    
-    await generate_docx(message, chat_id)
-    await state.clear()
 
 # Обработчики состояний
 @router.message(ReportState.fio)
@@ -310,8 +295,11 @@ async def handle_photo_only(message: Message, state: FSMContext):
     
     with session["lock"]:
         session["photo_queue"].append(message.photo[-1].file_id)
+        logger.info(f"Фото добавлено в очередь. Всего в очереди: {len(session['photo_queue'])}")
     
-    await process_next_photo(message, state)
+    # Если это первое фото в очереди - начинаем обработку
+    if len(session["photo_queue"]) == 1:
+        await process_next_photo(message, state)
 
 async def process_next_photo(message: Message, state: FSMContext):
     """Обработка следующего фото в очереди"""
@@ -322,7 +310,7 @@ async def process_next_photo(message: Message, state: FSMContext):
         if session["processing"] or not session["photo_queue"]:
             return
             
-        session["current_file_id"] = session["photo_queue"].pop(0)
+        session["current_file_id"] = session["photo_queue"][0]  # Берем первое фото, но не удаляем из очереди
         session["processing"] = True
         
         if not session["remaining_tags"]:
@@ -331,18 +319,26 @@ async def process_next_photo(message: Message, state: FSMContext):
             session["processing"] = False
             return
     
-    # Показываем кнопки с доступными типами
+    # Показываем фото с кнопками выбора типа
     buttons = [
         [InlineKeyboardButton(text=tag, callback_data=f"tag_{tag}")] 
         for tag in session["remaining_tags"]
     ]
     markup = InlineKeyboardMarkup(inline_keyboard=buttons)
     
-    await message.answer(
-        "Выберите тип фото:",
-        reply_markup=markup
-    )
-    await state.set_state(ReportState.choosing_tag)
+    try:
+        await bot.send_photo(
+            chat_id=chat_id,
+            photo=session["current_file_id"],
+            caption="Выберите тип этого фото:",
+            reply_markup=markup
+        )
+        await state.set_state(ReportState.choosing_tag)
+    except Exception as e:
+        logger.error(f"Ошибка отправки фото: {e}")
+        with session["lock"]:
+            session["current_file_id"] = None
+            session["processing"] = False
 
 @router.callback_query(F.data.startswith("tag_"))
 async def handle_photo_tag(callback: CallbackQuery, state: FSMContext):
@@ -369,6 +365,10 @@ async def handle_photo_tag(callback: CallbackQuery, state: FSMContext):
             )
         
         with session["lock"]:
+            # Удаляем обработанное фото из очереди
+            if session["photo_queue"]:
+                session["photo_queue"].pop(0)
+            
             session["photos"][tag] = photo_path
             if tag in session["remaining_tags"]:
                 session["remaining_tags"].remove(tag)
@@ -376,8 +376,18 @@ async def handle_photo_tag(callback: CallbackQuery, state: FSMContext):
             session["processing"] = False
         
         await callback.message.edit_text(f"✅ Фото сохранено как: {tag}")
+        
+        # Обрабатываем следующее фото, если есть
+        if session["photo_queue"]:
+            await process_next_photo(callback.message, state)
+        elif not session["remaining_tags"]:
+            await generate_docx(callback.message, chat_id)
+            await state.clear()
     else:
         await callback.message.edit_text("❌ Ошибка загрузки фото")
+        with session["lock"]:
+            session["current_file_id"] = None
+            session["processing"] = False
 
     await state.set_state(ReportState.input_photos)
 
