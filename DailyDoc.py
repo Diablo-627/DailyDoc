@@ -399,6 +399,7 @@ async def handle_tag(callback: CallbackQuery, state: FSMContext):
             with session["lock"]:
                 session["current_photo_message_id"] = None
         
+        # ИСПРАВЛЕННАЯ СТРОКА (была синтаксическая ошибка)
         await callback.answer(f"Фото сохранено как {tag} ({width_cm}x{height_cm} см)")
         
         # Проверяем завершение
@@ -470,8 +471,8 @@ async def debug_command(message: Message, state: FSMContext):
         if chat_id in user_sessions:
             session = user_sessions[chat_id]
             debug_info += (
-                f"Осталось тегов: {len(session['remaining_tags']}\n"
-                f"Фото в очереди: {len(session['photo_queue']}\n"
+                f"Осталось тегов: {len(session['remaining_tags'])}\n"
+                f"Фото в очереди: {len(session['photo_queue'])}\n"
                 f"Обработанные фото: {list(session['photos'].keys())}\n"
                 f"Текущее фото: {session['current_file_id']}\n"
                 f"Обрабатывается: {session['processing']}"
