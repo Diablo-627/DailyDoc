@@ -208,28 +208,31 @@ async def reset_session(message: Message, state: FSMContext):
     await state.clear()
     await message.answer("Сессия сброшена. Введите /start для начала.")
 
-@router.message(Command("debug"))
-async def debug_command(message: Message, state: FSMContext):
-    """Отладочная информация"""
+@router.message(Command("help"))
+async def help_handler(message: Message):
+    """Обработчик команды /help"""
+    help_text = (
+        "Доступные команды:\n"
+        "/start - Начать заполнение отчета\n"
+        "/generate - Сгенерировать отчет\n"
+        "/reset - Сбросить текущую сессию\n"
+        "/help - Показать эту справку"
+    )
+    await message.answer(help_text)
+
+@router.message(Command("generate"))
+async def generate_handler(message: Message, state: FSMContext):
+    """Обработчик команды /generate"""
     chat_id = message.chat.id
-    current_state = await state.get_state()
+    session = get_or_create_session(chat_id)
     
-    debug_info = f"Текущее состояние: {current_state}\n"
+    with session["lock"]:
+        if not session["photos"]:
+            await message.answer("Нет фото для генерации отчета.")
+            return
     
-    with session_lock:
-        if chat_id in user_sessions:
-            session = user_sessions[chat_id]
-            debug_info += (
-                f"Осталось тегов: {len(session['remaining_tags'])}\n"
-                f"Фото в очереди: {len(session['photo_queue'])}\n"
-                f"Обработанные фото: {list(session['photos'].keys())}\n"
-                f"Текущее фото: {session['current_file_id']}\n"
-                f"Обрабатывается: {session['processing']}"
-            )
-        else:
-            debug_info += "Активной сессии нет"
-    
-    await message.answer(debug_info)
+    await generate_docx(message, chat_id)
+    await state.clear()
 
 # Обработчики состояний
 @router.message(ReportState.fio)
@@ -296,21 +299,12 @@ async def handle_fighters(message: Message, state: FSMContext):
         session["fields"]["{6}"] = message.text
     
     await state.set_state(ReportState.input_photos)
-    await message.answer("Отправьте фото. После загрузки всех фото введите 'Готово'")
+    await message.answer("Отправляйте фото. Для каждого будет запрошен тип.")
 
 # Обработчики фото
-@router.message(F.content_type == ContentType.PHOTO)
-async def handle_any_photo(message: Message, state: FSMContext):
-    """Общий обработчик фото"""
-    current_state = await state.get_state()
-    if current_state != ReportState.input_photos:
-        await message.answer("Сначала заполните данные через /start")
-        return
-    
-    await handle_photos(message, state)
-
-async def handle_photos(message: Message, state: FSMContext):
-    """Основная обработка фото"""
+@router.message(F.photo)
+async def handle_photo_only(message: Message, state: FSMContext):
+    """Обработчик фото (игнорирует подписи)"""
     chat_id = message.chat.id
     session = get_or_create_session(chat_id)
     
@@ -325,131 +319,75 @@ async def process_next_photo(message: Message, state: FSMContext):
     session = get_or_create_session(chat_id)
     
     with session["lock"]:
-        if session["processing"] or not session["photo_queue"] or not session["remaining_tags"]:
+        if session["processing"] or not session["photo_queue"]:
             return
             
         session["current_file_id"] = session["photo_queue"].pop(0)
         session["processing"] = True
-    
-    if not session["remaining_tags"]:
-        await message.answer("Все фото обработаны. Введите 'Готово' для генерации отчета")
-        with session["lock"]:
+        
+        if not session["remaining_tags"]:
+            await message.answer("Все типы фото использованы! Введите /generate")
             session["current_file_id"] = None
             session["processing"] = False
-        return
+            return
     
-    buttons = [[InlineKeyboardButton(text=tag, callback_data=f"choose:{tag}")] 
-              for tag in session["remaining_tags"]]
+    # Показываем кнопки с доступными типами
+    buttons = [
+        [InlineKeyboardButton(text=tag, callback_data=f"tag_{tag}")] 
+        for tag in session["remaining_tags"]
+    ]
     markup = InlineKeyboardMarkup(inline_keyboard=buttons)
     
-    try:
-        sent_msg = await bot.send_photo(
-            chat_id=chat_id,
-            photo=session["current_file_id"],
-            caption="Выберите тип фото:",
-            reply_markup=markup
-        )
-        with session["lock"]:
-            session["current_photo_message_id"] = sent_msg.message_id
-        await state.set_state(ReportState.choosing_tag)
-    except Exception as e:
-        logger.error(f"Ошибка отправки фото: {e}")
-        with session["lock"]:
-            session["current_file_id"] = None
-            session["processing"] = False
-        await message.answer("Ошибка обработки фото. Попробуйте снова.")
+    await message.answer(
+        "Выберите тип фото:",
+        reply_markup=markup
+    )
+    await state.set_state(ReportState.choosing_tag)
 
-@router.callback_query(F.data.startswith("choose:"))
-async def handle_tag(callback: CallbackQuery, state: FSMContext):
-    """Обработка выбора тега для фото"""
+@router.callback_query(F.data.startswith("tag_"))
+async def handle_photo_tag(callback: CallbackQuery, state: FSMContext):
+    """Обработчик выбора типа фото"""
     chat_id = callback.message.chat.id
     session = get_or_create_session(chat_id)
+    tag = callback.data.replace("tag_", "")
     
-    with session["lock"]:
-        if not session["current_file_id"]:
-            await callback.answer("Нет активного фото")
-            return
-            
-        tag = callback.data.split(":")[1]
-        photo_path = os.path.join(PHOTOS_DIR, f"{chat_id}_{tag}.jpg")
-        file_id = session["current_file_id"]
-        session["current_file_id"] = None
+    if not session["current_file_id"]:
+        await callback.answer("Фото уже обработано")
+        return
     
-    try:
-        # Удаляем старое фото если есть
-        if os.path.exists(photo_path):
-            try:
-                os.remove(photo_path)
-            except Exception as e:
-                logger.error(f"Ошибка удаления фото: {e}")
-        
-        # Загружаем фото
-        if not await download_photo_with_retry(file_id, photo_path):
-            await callback.message.answer("Ошибка загрузки фото")
-            return
-        
-        # Обрабатываем изображение
-        width_cm, height_cm = PHOTO_SIZES.get(tag, PHOTO_SIZES["default"])
+    # Сохраняем фото
+    photo_path = os.path.join(PHOTOS_DIR, f"{chat_id}_{tag}.jpg")
+    if await download_photo_with_retry(session["current_file_id"], photo_path):
+        width, height = PHOTO_SIZES.get(tag, PHOTO_SIZES["default"])
         
         async with processing_semaphore:
             loop = asyncio.get_running_loop()
             await loop.run_in_executor(
                 executor,
                 resize_and_crop_image,
-                photo_path, width_cm, height_cm
+                photo_path, width, height
             )
         
-        # Обновляем сессию
         with session["lock"]:
             session["photos"][tag] = photo_path
             if tag in session["remaining_tags"]:
                 session["remaining_tags"].remove(tag)
+            session["current_file_id"] = None
             session["processing"] = False
         
-        # Удаляем сообщение с кнопками
-        if session.get("current_photo_message_id"):
-            try:
-                await bot.delete_message(chat_id, session["current_photo_message_id"])
-            except Exception as e:
-                logger.error(f"Ошибка удаления сообщения: {e}")
-            with session["lock"]:
-                session["current_photo_message_id"] = None
-        
-        await callback.answer(f"Фото сохранено как {tag}")
-        
-        # Проверяем завершение
-        with session["lock"]:
-            if not session["remaining_tags"]:
-                await callback.message.answer("Все фото обработаны. Введите 'Готово'")
-            else:
-                await state.set_state(ReportState.input_photos)
-                await process_next_photo(callback.message, state)
-            
-    except Exception as e:
-        logger.error(f"Ошибка обработки фото: {e}", exc_info=True)
-        await callback.message.answer("Ошибка обработки фото")
-        with session["lock"]:
-            session["processing"] = False
-        await state.set_state(ReportState.input_photos)
-
-# Обработчик текста в режиме фото
-@router.message(ReportState.input_photos, F.text)
-async def handle_text_during_photos(message: Message, state: FSMContext):
-    """Обработка текста при загрузке фото"""
-    if message.text.lower() == 'готово':
-        chat_id = message.chat.id
-        session = get_or_create_session(chat_id)
-        
-        with session["lock"]:
-            if not session["photos"]:
-                await message.answer("Нет фото для отчета")
-                return
-        
-        await message.answer("Генерирую отчет...")
-        await generate_docx(message, chat_id)
-        await state.clear()
+        await callback.message.edit_text(f"✅ Фото сохранено как: {tag}")
     else:
-        await message.answer("Отправьте фото или введите 'Готово'")
+        await callback.message.edit_text("❌ Ошибка загрузки фото")
+
+    await state.set_state(ReportState.input_photos)
+
+# Игнорирование текста (кроме команд)
+@router.message(F.text)
+async def ignore_text_messages(message: Message):
+    """Игнорирует текст, если это не команда"""
+    if not message.text.startswith('/'):
+        return
+    await message.answer("Используйте /help для списка команд")
 
 # Генерация документа
 async def replace_image_in_docx(doc_path: str, image_tag: str, new_image_path: str):
@@ -577,13 +515,6 @@ async def generate_docx(message: Message, chat_id: int):
                     except Exception as e:
                         logger.error(f"Ошибка удаления фото: {e}")
                 del user_sessions[chat_id]
-
-# Обработчик неизвестных сообщений
-@router.message()
-async def handle_unknown(message: Message):
-    """Фолбэк обработчик"""
-    logger.warning(f"Необработанное сообщение: {message.content_type}")
-    await message.answer("Используйте /start для начала работы")
 
 # Запуск/остановка
 async def on_startup(dispatcher: Dispatcher):
