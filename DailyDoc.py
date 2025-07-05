@@ -8,6 +8,8 @@ import tempfile
 from PIL import Image
 from dotenv import load_dotenv
 import xml.etree.ElementTree as ET
+from concurrent.futures import ThreadPoolExecutor
+from threading import Lock
 
 # Импорты aiogram 3.x
 from aiogram import Bot, Dispatcher, Router, F
@@ -24,7 +26,7 @@ from aiogram.fsm.state import State, StatesGroup
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.storage.memory import MemoryStorage
 
-# CHANGED: Добавлены импорты для веб-сервера
+# Для веб-сервера
 from aiohttp import web
 from aiogram.webhook.aiohttp_server import SimpleRequestHandler, setup_application
 
@@ -34,7 +36,11 @@ load_dotenv()
 # Настройка логирования
 logging.basicConfig(
     level=logging.INFO,
-    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s"
+    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
+    handlers=[
+        logging.FileHandler("bot.log"),  # Логи в файл
+        logging.StreamHandler()           # Логи в консоль
+    ]
 )
 logger = logging.getLogger(__name__)
 
@@ -51,9 +57,12 @@ TEMPLATE_DOCX = os.path.join(BASE_DIR, "template22.docx")
 os.makedirs(PHOTOS_DIR, exist_ok=True)
 os.makedirs(TEMP_DIR, exist_ok=True)
 
-# CHANGED: Инициализация бота и диспетчера в правильном порядке
+# Инициализация пула потоков для тяжелых операций
+executor = ThreadPoolExecutor(max_workers=3)  # Ограничиваем до 3 параллельных обработок
+
+# Инициализация бота и диспетчера
 bot = Bot(token=API_TOKEN, parse_mode=ParseMode.HTML)
-dp = Dispatcher(storage=MemoryStorage())
+dp = Dispatcher(storage=MemoryStorage(), executor=executor)
 router = Router()
 dp.include_router(router)
 
@@ -83,8 +92,32 @@ class ReportState(StatesGroup):
     input_photos = State()
     choosing_tag = State()
 
-# Глобальный словарь для хранения сессий пользователей
+# Глобальный словарь для хранения сессий пользователей с блокировкой
 user_sessions = {}
+session_lock = Lock()
+
+def get_or_create_session(chat_id):
+    """Получает или создает сессию пользователя с блокировкой"""
+    with session_lock:
+        if chat_id not in user_sessions:
+            user_sessions[chat_id] = {
+                "fields": {
+                    "{}1{}": "",  # ФИО
+                    "{}2{}": "",  # Отряд
+                    "{3}": "",    # Дата
+                    "{4}": "",    # Адрес
+                    "{5}": "",    # Мешки
+                    "{6}": ""     # Бойцы
+                },
+                "photos": {},
+                "remaining_tags": photo_tags.copy(),
+                "photo_queue": [],
+                "current_file_id": None,
+                "current_photo_message_id": None,
+                "lock": Lock(),  # Лок для сессии
+                "processing": False  # Флаг обработки
+            }
+        return user_sessions[chat_id]
 
 def resize_and_crop_image(image_path, target_width_cm, target_height_cm):
     """Изменяет размер изображения с сохранением пропорций и обрезкой под нужный размер"""
@@ -97,8 +130,8 @@ def resize_and_crop_image(image_path, target_width_cm, target_height_cm):
         if img.mode != 'RGB':
             img = img.convert('RGB')
         
-        # Сохраняем оригинальное качество
-        quality = 100 if target_width_cm > 15 else 95
+        # Уменьшаем качество для экономии памяти
+        quality = 90  # Уменьшено с 95 до 90
         
         # Вычисляем соотношения сторон
         width, height = img.size
@@ -129,7 +162,7 @@ def resize_and_crop_image(image_path, target_width_cm, target_height_cm):
         # Ресайзим до целевого размера с использованием LANCZOS (высокое качество)
         img = img.resize((target_width, target_height), Image.LANCZOS)
         
-        # Сохраняем обратно с высоким качеством
+        # Сохраняем обратно с указанным качеством
         img.save(image_path, format="JPEG", quality=quality, subsampling=0)
         logger.info(f"Изображение изменено до {target_width}x{target_height} пикселей ({target_width_cm}x{target_height_cm} см), качество: {quality}")
 
@@ -154,7 +187,7 @@ async def download_photo_with_retry(file_id: str, destination_path: str, max_att
         except Exception as e:
             logger.error(f"Попытка {attempt + 1} из {max_attempts} не удалась: {e}")
             if attempt < max_attempts - 1:
-                await asyncio.sleep(5)
+                await asyncio.sleep(3)  # Уменьшено время ожидания
     
     return False
 
@@ -163,118 +196,124 @@ async def start(message: Message, state: FSMContext):
     chat_id = message.chat.id
     
     # Инициализация сессии для пользователя
-    user_sessions[chat_id] = {
-        "fields": {
-            "{}1{}": "",  # ФИО
-            "{}2{}": "",  # Отряд
-            "{3}": "",    # Дата
-            "{4}": "",    # Адрес
-            "{5}": "",    # Мешки
-            "{6}": ""     # Бойцы
-        },
-        "photos": {},
-        "remaining_tags": photo_tags.copy(),
-        "photo_queue": [],
-        "current_file_id": None,
-        "current_photo_message_id": None,
-    }
+    session = get_or_create_session(chat_id)
+    
+    # Сбрасываем состояние сессии
+    with session["lock"]:
+        session["fields"] = {
+            "{}1{}": "", "{}2{}": "", "{3}": "", 
+            "{4}": "", "{5}": "", "{6}": ""
+        }
+        session["photos"] = {}
+        session["remaining_tags"] = photo_tags.copy()
+        session["photo_queue"] = []
+        session["current_file_id"] = None
+        session["current_photo_message_id"] = None
+        session["processing"] = False
+    
     await state.set_state(ReportState.fio)
     await message.answer("Введите ФИО координатора:")
 
 @router.message(ReportState.fio)
 async def handle_fio(message: Message, state: FSMContext):
     chat_id = message.chat.id
-    if chat_id not in user_sessions:
-        await message.answer("Сессия устарела. Введите 'го' для начала.")
-        return
+    session = get_or_create_session(chat_id)
     
-    user_sessions[chat_id]["fields"]["{}1{}"] = message.text
+    with session["lock"]:
+        session["fields"]["{}1{}"] = message.text
+    
     await state.set_state(ReportState.team)
     await message.answer("Введите название отряда:")
 
 @router.message(ReportState.team)
 async def handle_team(message: Message, state: FSMContext):
     chat_id = message.chat.id
-    if chat_id not in user_sessions:
-        await message.answer("Сессия устарела. Введите 'го' для начала.")
-        return
+    session = get_or_create_session(chat_id)
     
-    user_sessions[chat_id]["fields"]["{}2{}"] = message.text
+    with session["lock"]:
+        session["fields"]["{}2{}"] = message.text
+    
     await state.set_state(ReportState.date)
     await message.answer("Введите дату уборки:")
 
 @router.message(ReportState.date)
 async def handle_date(message: Message, state: FSMContext):
     chat_id = message.chat.id
-    if chat_id not in user_sessions:
-        await message.answer("Сессия устарела. Введите 'го' для начала.")
-        return
+    session = get_or_create_session(chat_id)
     
-    user_sessions[chat_id]["fields"]["{3}"] = message.text
+    with session["lock"]:
+        session["fields"]["{3}"] = message.text
+    
     await state.set_state(ReportState.address)
     await message.answer("Введите адрес уборки:")
 
 @router.message(ReportState.address)
 async def handle_address(message: Message, state: FSMContext):
     chat_id = message.chat.id
-    if chat_id not in user_sessions:
-        await message.answer("Сессия устарела. Введите 'го' для начала.")
-        return
+    session = get_or_create_session(chat_id)
     
-    user_sessions[chat_id]["fields"]["{4}"] = message.text
+    with session["lock"]:
+        session["fields"]["{4}"] = message.text
+    
     await state.set_state(ReportState.bags)
     await message.answer("Введите количество мешков:")
 
 @router.message(ReportState.bags)
 async def handle_bags(message: Message, state: FSMContext):
     chat_id = message.chat.id
-    if chat_id not in user_sessions:
-        await message.answer("Сессия устарела. Введите 'го' для начала.")
-        return
+    session = get_or_create_session(chat_id)
     
-    user_sessions[chat_id]["fields"]["{5}"] = message.text
+    with session["lock"]:
+        session["fields"]["{5}"] = message.text
+    
     await state.set_state(ReportState.fighters)
     await message.answer("Введите количество бойцов:")
 
 @router.message(ReportState.fighters)
 async def handle_fighters(message: Message, state: FSMContext):
     chat_id = message.chat.id
-    if chat_id not in user_sessions:
-        await message.answer("Сессия устарела. Введите 'го' для начала.")
-        return
+    session = get_or_create_session(chat_id)
     
-    user_sessions[chat_id]["fields"]["{6}"] = message.text
+    with session["lock"]:
+        session["fields"]["{6}"] = message.text
+    
     await state.set_state(ReportState.input_photos)
     await message.answer("Отправьте одно или несколько фото. После каждого будет предложено выбрать метку.")
 
 @router.message(ReportState.input_photos, F.content_type == ContentType.PHOTO)
 async def handle_photos(message: Message, state: FSMContext):
     chat_id = message.chat.id
-    if chat_id not in user_sessions:
-        await message.answer("Сессия устарела. Введите 'го' для начала.")
-        return
+    session = get_or_create_session(chat_id)
     
-    session = user_sessions[chat_id]
-    session["photo_queue"].append(message.photo[-1].file_id)
+    # Добавляем фото в очередь
+    with session["lock"]:
+        session["photo_queue"].append(message.photo[-1].file_id)
+    
+    # Обрабатываем следующее фото
     await process_next_photo(message, state)
 
 async def process_next_photo(message: Message, state: FSMContext):
     chat_id = message.chat.id
-    if chat_id not in user_sessions:
-        return
+    session = get_or_create_session(chat_id)
     
-    session = user_sessions[chat_id]
+    # Проверяем флаг обработки
+    with session["lock"]:
+        if session["processing"]:
+            return
+            
+        # Проверка, что есть фото для обработки
+        if not session["photo_queue"] or not session["remaining_tags"]:
+            return
+            
+        session["current_file_id"] = session["photo_queue"].pop(0)
+        session["processing"] = True
     
-    # FIXED: Проверка, что есть фото для обработки
-    if not session["photo_queue"]:
-        return
-    
-    session["current_file_id"] = session["photo_queue"].pop(0)
-    
-    # FIXED: Проверка, что остались доступные теги
+    # Проверка, что остались доступные теги
     if not session["remaining_tags"]:
         await message.answer("Все фото уже были отмечены.")
-        session["current_file_id"] = None
+        with session["lock"]:
+            session["current_file_id"] = None
+            session["processing"] = False
         return
     
     buttons = [[InlineKeyboardButton(text=tag, callback_data=f"choose:{tag}")] for tag in session["remaining_tags"]]
@@ -287,115 +326,139 @@ async def process_next_photo(message: Message, state: FSMContext):
             caption="Выберите, что изображено на фото:", 
             reply_markup=markup
         )
-        session["current_photo_message_id"] = sent_msg.message_id
+        with session["lock"]:
+            session["current_photo_message_id"] = sent_msg.message_id
         await state.set_state(ReportState.choosing_tag)
     except Exception as e:
         logger.error(f"Ошибка при отправке фото: {e}")
-        session["current_file_id"] = None
+        with session["lock"]:
+            session["current_file_id"] = None
+            session["processing"] = False
         await message.answer("Произошла ошибка при обработке фото. Попробуйте отправить его снова.")
         await state.set_state(ReportState.input_photos)
 
 @router.callback_query(F.data.startswith("choose:"))
 async def handle_tag(callback: CallbackQuery, state: FSMContext):
     chat_id = callback.message.chat.id
-    if chat_id not in user_sessions:
-        await callback.answer("Сессия устарела. Начните заново.")
-        return
+    session = get_or_create_session(chat_id)
     
-    session = user_sessions[chat_id]
-    if session["current_file_id"] is None:
-        await callback.answer("Нет активного фото для обработки.")
-        return
-    
-    tag = callback.data.split(":")[1]
-    photo_path = os.path.join(PHOTOS_DIR, f"{chat_id}_{tag}.jpg")
-    
-    # Удаляем старое фото, если оно есть
-    if os.path.exists(photo_path):
-        try:
-            os.remove(photo_path)
-        except Exception as e:
-            logger.error(f"Ошибка при удалении старого фото: {e}")
-    
-    # Пытаемся скачать фото с ожиданием
-    success = await download_photo_with_retry(session["current_file_id"], photo_path)
-    
-    if not success:
-        await callback.message.answer(f"Не удалось скачать фото {tag}. Попробуйте отправить его снова.")
+    # Проверка состояния с блокировкой
+    with session["lock"]:
+        if session["current_file_id"] is None:
+            await callback.answer("Нет активного фото для обработки.")
+            return
+            
+        tag = callback.data.split(":")[1]
+        photo_path = os.path.join(PHOTOS_DIR, f"{chat_id}_{tag}.jpg")
+        file_id = session["current_file_id"]
         session["current_file_id"] = None
-        
-        # FIXED: Сбрасываем состояние для продолжения работы
-        await state.set_state(ReportState.input_photos)
-        
-        if session.get("current_photo_message_id"):
-            try:
-                await bot.delete_message(chat_id, session["current_photo_message_id"])
-            except Exception as e:
-                logger.error(f"Ошибка при удалении сообщения: {e}")
-        session["current_photo_message_id"] = None
-        return
     
     try:
+        # Удаляем старое фото, если оно есть
+        if os.path.exists(photo_path):
+            try:
+                os.remove(photo_path)
+            except Exception as e:
+                logger.error(f"Ошибка при удалении старого фото: {e}")
+        
+        # Пытаемся скачать фото с ожиданием
+        success = await download_photo_with_retry(file_id, photo_path)
+        
+        if not success:
+            await callback.message.answer(f"Не удалось скачать фото {tag}. Попробуйте отправить его снова.")
+            # Сбрасываем состояние для продолжения работы
+            with session["lock"]:
+                session["processing"] = False
+            await state.set_state(ReportState.input_photos)
+            return
+        
         # Определяем размеры для этого типа фото
         width_cm, height_cm = PHOTO_SIZES.get(tag, PHOTO_SIZES["default"])
         
-        # Обрабатываем фото - изменяем размер и обрезаем
-        resize_and_crop_image(photo_path, width_cm, height_cm)
+        # Обрабатываем фото в потоке (не блокируем event loop)
+        loop = asyncio.get_running_loop()
+        await loop.run_in_executor(
+            executor, 
+            resize_and_crop_image, 
+            photo_path, width_cm, height_cm
+        )
         
-        session["photos"][tag] = photo_path
-        session["remaining_tags"].remove(tag)
-        session["current_file_id"] = None
+        # Обновляем сессию
+        with session["lock"]:
+            session["photos"][tag] = photo_path
+            if tag in session["remaining_tags"]:
+                session["remaining_tags"].remove(tag)
+            session["processing"] = False
         
+        # Удаляем сообщение с кнопками
         if session.get("current_photo_message_id"):
             try:
                 await bot.delete_message(chat_id, session["current_photo_message_id"])
             except Exception as e:
                 logger.error(f"Ошибка при удалении сообщения: {e}")
-            session["current_photo_message_id"] = None
+            with session["lock"]:
+                session["current_photo_message_id"] = None
         
         await callback.answer(f"Фото сохранено как {tag} ({width_cm}x{height_cm} см)")
         
-        if not session["remaining_tags"]:
-            await callback.message.answer("Генерирую отчёт... Подождите 5–10 секунд.")
-            await generate_docx(callback.message, chat_id)
-            await state.clear()
-        else:
-            # FIXED: Возвращаем в состояние ожидания фото
-            await state.set_state(ReportState.input_photos)
-            # FIXED: Обрабатываем следующее фото в очереди
-            await process_next_photo(callback.message, state)
+        # Проверяем завершение
+        with session["lock"]:
+            if not session["remaining_tags"]:
+                await callback.message.answer("Генерирую отчёт... Подождите 5–10 секунд.")
+                await generate_docx(callback.message, chat_id)
+                await state.clear()
+            else:
+                # Возвращаем в состояние ожидания фото
+                await state.set_state(ReportState.input_photos)
+                # Обрабатываем следующее фото в очереди
+                await process_next_photo(callback.message, state)
             
     except Exception as e:
         logger.error(f"Ошибка обработки фото {tag}: {e}", exc_info=True)
         await callback.message.answer(f"Ошибка обработки фото: {e}")
         
-        # FIXED: Сбрасываем состояние для продолжения работы
-        session["current_file_id"] = None
+        # Сбрасываем состояние для продолжения работы
+        with session["lock"]:
+            session["processing"] = False
         await state.set_state(ReportState.input_photos)
-        
-        # FIXED: Пытаемся обработать следующее фото
         await process_next_photo(callback.message, state)
 
-# FIXED: Исправлена обработка команды /reset
+@router.message(ReportState.input_photos, F.text)
+async def handle_text_during_photos(message: Message):
+    await message.answer("Пожалуйста, отправьте фото. Если вы закончили отправку фото, введите команду /generate")
+
+@router.message(Command("generate"))
+async def force_generate(message: Message, state: FSMContext):
+    chat_id = message.chat.id
+    session = get_or_create_session(chat_id)
+    
+    with session["lock"]:
+        if not session["photos"]:
+            await message.answer("Нет фото для генерации отчета.")
+            return
+            
+        await message.answer("Генерирую отчёт... Подождите 5–10 секунд.")
+        await generate_docx(message, chat_id)
+        await state.clear()
+
 @router.message(Command("reset"))
 async def reset_session(message: Message, state: FSMContext):
     chat_id = message.chat.id
-    if chat_id in user_sessions:
-        # Удаляем все файлы пользователя
-        for tag, path in user_sessions[chat_id]["photos"].items():
-            try:
-                if os.path.exists(path):
-                    os.remove(path)
-            except Exception as e:
-                logger.error(f"Ошибка при удалении фото: {e}")
-        del user_sessions[chat_id]
+    with session_lock:
+        if chat_id in user_sessions:
+            # Удаляем все файлы пользователя
+            for tag, path in user_sessions[chat_id]["photos"].items():
+                try:
+                    if os.path.exists(path):
+                        os.remove(path)
+                except Exception as e:
+                    logger.error(f"Ошибка при удалении фото: {e}")
+            del user_sessions[chat_id]
     
-    # FIXED: Полностью очищаем состояние
+    # Полностью очищаем состояние
     await state.clear()
-    
     await message.answer("Сессия сброшена. Введите 'го' для начала.")
 
-# FIXED: Добавлена команда для отладки
 @router.message(Command("debug"))
 async def debug_command(message: Message, state: FSMContext):
     chat_id = message.chat.id
@@ -403,16 +466,18 @@ async def debug_command(message: Message, state: FSMContext):
     
     debug_info = f"Текущее состояние: {current_state}\n"
     
-    if chat_id in user_sessions:
-        session = user_sessions[chat_id]
-        debug_info += (
-            f"Осталось тегов: {len(session['remaining_tags'])}\n"
-            f"Фото в очереди: {len(session['photo_queue'])}\n"
-            f"Обработанные фото: {list(session['photos'].keys())}\n"
-            f"Текущее фото: {session['current_file_id']}\n"
-        )
-    else:
-        debug_info += "Активной сессии нет"
+    with session_lock:
+        if chat_id in user_sessions:
+            session = user_sessions[chat_id]
+            debug_info += (
+                f"Осталось тегов: {len(session['remaining_tags']}\n"
+                f"Фото в очереди: {len(session['photo_queue']}\n"
+                f"Обработанные фото: {list(session['photos'].keys())}\n"
+                f"Текущее фото: {session['current_file_id']}\n"
+                f"Обрабатывается: {session['processing']}"
+            )
+        else:
+            debug_info += "Активной сессии нет"
     
     await message.answer(debug_info)
 
@@ -575,14 +640,17 @@ async def generate_docx(message: Message, chat_id: int):
         
         # Очищаем сессию
         if chat_id in user_sessions:
-            del user_sessions[chat_id]
+            with session_lock:
+                if chat_id in user_sessions:
+                    del user_sessions[chat_id]
 
-# CHANGED: Обновленные функции запуска/остановки
+# Функции запуска/остановки
 async def on_startup(dispatcher: Dispatcher):
     logger.info("Бот успешно запущен")
     # Устанавливаем вебхук при запуске
     webhook_url = os.getenv("WEBHOOK_URL")
     if webhook_url:
+        logger.info(f"Устанавливаю вебхук: {webhook_url}")
         await bot.set_webhook(webhook_url)
 
 async def on_shutdown(dispatcher: Dispatcher):
@@ -596,10 +664,14 @@ async def on_shutdown(dispatcher: Dispatcher):
             if file.endswith(".jpg") or file.endswith(".docx"):
                 try:
                     os.remove(os.path.join(root, file))
-                except:
-                    pass
+                except Exception as e:
+                    logger.error(f"Ошибка удаления временного файла: {e}")
+    
+    # Очищаем сессии
+    with session_lock:
+        user_sessions.clear()
 
-# CHANGED: Весь этот блок заменен на новую конфигурацию запуска
+# Запуск веб-сервера
 if __name__ == "__main__":
     # Создаем aiohttp приложение
     app = web.Application()
