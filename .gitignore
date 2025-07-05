@@ -8,3 +8,5 @@ photos/
 temp/
 .DS_Store
 venv/
+poetry.lock
+pyproject.toml
