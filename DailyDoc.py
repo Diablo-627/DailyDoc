@@ -264,13 +264,17 @@ async def process_next_photo(message: Message, state: FSMContext):
         return
     
     session = user_sessions[chat_id]
-    if session["current_file_id"] is not None or not session["photo_queue"]:
+    
+    # FIXED: Проверка, что есть фото для обработки
+    if not session["photo_queue"]:
         return
     
     session["current_file_id"] = session["photo_queue"].pop(0)
     
+    # FIXED: Проверка, что остались доступные теги
     if not session["remaining_tags"]:
         await message.answer("Все фото уже были отмечены.")
+        session["current_file_id"] = None
         return
     
     buttons = [[InlineKeyboardButton(text=tag, callback_data=f"choose:{tag}")] for tag in session["remaining_tags"]]
@@ -319,13 +323,16 @@ async def handle_tag(callback: CallbackQuery, state: FSMContext):
     if not success:
         await callback.message.answer(f"Не удалось скачать фото {tag}. Попробуйте отправить его снова.")
         session["current_file_id"] = None
+        
+        # FIXED: Сбрасываем состояние для продолжения работы
+        await state.set_state(ReportState.input_photos)
+        
         if session.get("current_photo_message_id"):
             try:
                 await bot.delete_message(chat_id, session["current_photo_message_id"])
             except Exception as e:
                 logger.error(f"Ошибка при удалении сообщения: {e}")
         session["current_photo_message_id"] = None
-        await state.set_state(ReportState.input_photos)
         return
     
     try:
@@ -353,16 +360,24 @@ async def handle_tag(callback: CallbackQuery, state: FSMContext):
             await generate_docx(callback.message, chat_id)
             await state.clear()
         else:
+            # FIXED: Возвращаем в состояние ожидания фото
             await state.set_state(ReportState.input_photos)
+            # FIXED: Обрабатываем следующее фото в очереди
             await process_next_photo(callback.message, state)
             
     except Exception as e:
-        logger.error(f"Ошибка обработки фото {tag}: {e}")
+        logger.error(f"Ошибка обработки фото {tag}: {e}", exc_info=True)
         await callback.message.answer(f"Ошибка обработки фото: {e}")
+        
+        # FIXED: Сбрасываем состояние для продолжения работы
         session["current_file_id"] = None
         await state.set_state(ReportState.input_photos)
+        
+        # FIXED: Пытаемся обработать следующее фото
+        await process_next_photo(callback.message, state)
 
-@router.message(F.text == "/reset")
+# FIXED: Исправлена обработка команды /reset
+@router.message(Command("reset"))
 async def reset_session(message: Message, state: FSMContext):
     chat_id = message.chat.id
     if chat_id in user_sessions:
@@ -374,8 +389,32 @@ async def reset_session(message: Message, state: FSMContext):
             except Exception as e:
                 logger.error(f"Ошибка при удалении фото: {e}")
         del user_sessions[chat_id]
+    
+    # FIXED: Полностью очищаем состояние
     await state.clear()
-    await message.answer("Сессия сброшена. Введите 'го' заново.")
+    
+    await message.answer("Сессия сброшена. Введите 'го' для начала.")
+
+# FIXED: Добавлена команда для отладки
+@router.message(Command("debug"))
+async def debug_command(message: Message, state: FSMContext):
+    chat_id = message.chat.id
+    current_state = await state.get_state()
+    
+    debug_info = f"Текущее состояние: {current_state}\n"
+    
+    if chat_id in user_sessions:
+        session = user_sessions[chat_id]
+        debug_info += (
+            f"Осталось тегов: {len(session['remaining_tags'])}\n"
+            f"Фото в очереди: {len(session['photo_queue'])}\n"
+            f"Обработанные фото: {list(session['photos'].keys())}\n"
+            f"Текущее фото: {session['current_file_id']}\n"
+        )
+    else:
+        debug_info += "Активной сессии нет"
+    
+    await message.answer(debug_info)
 
 async def replace_image_in_docx(doc_path: str, image_tag: str, new_image_path: str):
     """Заменяет изображение в документе по тегу, сохраняя все свойства оригинала"""
