@@ -6,14 +6,23 @@ import time
 import zipfile
 import tempfile
 from PIL import Image
-from aiogram import Bot, Dispatcher, F, Router
+from dotenv import load_dotenv
+import xml.etree.ElementTree as ET
+
+# Импорты aiogram 3.x
+from aiogram import Bot, Dispatcher, Router, F
 from aiogram.enums import ParseMode, ContentType
-from aiogram.types import Message, FSInputFile, CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup
+from aiogram.types import (
+    Message,
+    FSInputFile,
+    CallbackQuery,
+    InlineKeyboardButton,
+    InlineKeyboardMarkup
+)
+from aiogram.filters import Command
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.storage.memory import MemoryStorage
-import xml.etree.ElementTree as ET
-from dotenv import load_dotenv
 # Загрузка переменных окружения
 load_dotenv()
 
