@@ -23,6 +23,11 @@ from aiogram.filters import Command
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.storage.memory import MemoryStorage
+
+# CHANGED: Добавлены импорты для веб-сервера
+from aiohttp import web
+from aiogram.webhook.aiohttp_server import SimpleRequestHandler, setup_application
+
 # Загрузка переменных окружения
 load_dotenv()
 
@@ -46,6 +51,7 @@ TEMPLATE_DOCX = os.path.join(BASE_DIR, "template22.docx")
 os.makedirs(PHOTOS_DIR, exist_ok=True)
 os.makedirs(TEMP_DIR, exist_ok=True)
 
+# CHANGED: Инициализация бота и диспетчера в правильном порядке
 bot = Bot(token=API_TOKEN, parse_mode=ParseMode.HTML)
 dp = Dispatcher(storage=MemoryStorage())
 router = Router()
@@ -532,11 +538,19 @@ async def generate_docx(message: Message, chat_id: int):
         if chat_id in user_sessions:
             del user_sessions[chat_id]
 
-async def on_startup(dispatcher):
+# CHANGED: Обновленные функции запуска/остановки
+async def on_startup(dispatcher: Dispatcher):
     logger.info("Бот успешно запущен")
+    # Устанавливаем вебхук при запуске
+    webhook_url = os.getenv("WEBHOOK_URL")
+    if webhook_url:
+        await bot.set_webhook(webhook_url)
 
-async def on_shutdown(dispatcher):
+async def on_shutdown(dispatcher: Dispatcher):
     logger.info("Бот выключается...")
+    # Удаляем вебхук при выключении
+    await bot.delete_webhook()
+    
     # Очищаем все временные файлы
     for root, dirs, files in os.walk(BASE_DIR):
         for file in files:
@@ -546,11 +560,28 @@ async def on_shutdown(dispatcher):
                 except:
                     pass
 
+# CHANGED: Весь этот блок заменен на новую конфигурацию запуска
 if __name__ == "__main__":
+    # Создаем aiohttp приложение
+    app = web.Application()
+    
     # Регистрируем обработчики запуска/остановки
     dp.startup.register(on_startup)
     dp.shutdown.register(on_shutdown)
     
-    # Запускаем бота
-    logging.basicConfig(level=logging.INFO)
-    asyncio.run(dp.start_polling(bot))
+    # Создаем обработчик вебхуков
+    webhook_handler = SimpleRequestHandler(
+        dispatcher=dp,
+        bot=bot,
+    )
+    webhook_handler.register(app, path="/webhook")
+    
+    # Настраиваем порт для Render
+    port = int(os.environ.get("PORT", 5000))
+    
+    # Запускаем веб-сервер
+    web.run_app(
+        app,
+        host="0.0.0.0",
+        port=port,
+    )
