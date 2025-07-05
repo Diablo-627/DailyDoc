@@ -114,7 +114,6 @@ def get_or_create_session(chat_id):
                 "remaining_tags": photo_tags.copy(),
                 "photo_queue": [],
                 "current_file_id": None,
-                "current_photo_message_id": None,
                 "lock": Lock(),
                 "processing": False
             }
@@ -185,7 +184,6 @@ async def start_command(message: Message, state: FSMContext):
         session["remaining_tags"] = photo_tags.copy()
         session["photo_queue"] = []
         session["current_file_id"] = None
-        session["current_photo_message_id"] = None
         session["processing"] = False
     
     await state.set_state(ReportState.fio)
@@ -299,11 +297,10 @@ async def handle_photo_only(message: Message, state: FSMContext):
     
     # Если это первое фото в очереди - начинаем обработку
     if len(session["photo_queue"]) == 1:
-        await process_next_photo(message, state)
+        await process_next_photo(chat_id, state)
 
-async def process_next_photo(message: Message, state: FSMContext):
+async def process_next_photo(chat_id: int, state: FSMContext):
     """Обработка следующего фото в очереди"""
-    chat_id = message.chat.id
     session = get_or_create_session(chat_id)
     
     with session["lock"]:
@@ -314,7 +311,8 @@ async def process_next_photo(message: Message, state: FSMContext):
         session["processing"] = True
         
         if not session["remaining_tags"]:
-            await message.answer("Все типы фото использованы! Введите /generate")
+            await bot.send_message(chat_id, "Все типы фото использованы! Введите /generate")
+            session["photo_queue"] = []  # Очищаем очередь
             session["current_file_id"] = None
             session["processing"] = False
             return
@@ -337,6 +335,9 @@ async def process_next_photo(message: Message, state: FSMContext):
     except Exception as e:
         logger.error(f"Ошибка отправки фото: {e}")
         with session["lock"]:
+            # Удаляем текущее фото из очереди (которое не удалось отправить)
+            if session["photo_queue"]:
+                session["photo_queue"].pop(0)
             session["current_file_id"] = None
             session["processing"] = False
 
@@ -364,6 +365,15 @@ async def handle_photo_tag(callback: CallbackQuery, state: FSMContext):
                 photo_path, width, height
             )
         
+        # Удаляем сообщение с фото и кнопками
+        try:
+            await callback.message.delete()
+        except Exception as e:
+            logger.error(f"Ошибка при удалении сообщения: {e}")
+        
+        # Отправляем новое текстовое сообщение вместо редактирования
+        await callback.message.answer(f"✅ Фото сохранено как: {tag}")
+        
         with session["lock"]:
             # Удаляем обработанное фото из очереди
             if session["photo_queue"]:
@@ -375,19 +385,25 @@ async def handle_photo_tag(callback: CallbackQuery, state: FSMContext):
             session["current_file_id"] = None
             session["processing"] = False
         
-        await callback.message.edit_text(f"✅ Фото сохранено как: {tag}")
-        
         # Обрабатываем следующее фото, если есть
         if session["photo_queue"]:
-            await process_next_photo(callback.message, state)
+            await process_next_photo(chat_id, state)
         elif not session["remaining_tags"]:
             await generate_docx(callback.message, chat_id)
             await state.clear()
     else:
-        await callback.message.edit_text("❌ Ошибка загрузки фото")
+        # Отправляем новое сообщение об ошибке
+        await callback.message.answer("❌ Ошибка загрузки фото")
         with session["lock"]:
+            # Удаляем текущее фото из очереди
+            if session["photo_queue"]:
+                session["photo_queue"].pop(0)
             session["current_file_id"] = None
             session["processing"] = False
+        
+        # Обрабатываем следующее фото, если есть
+        if session["photo_queue"]:
+            await process_next_photo(chat_id, state)
 
     await state.set_state(ReportState.input_photos)
 
