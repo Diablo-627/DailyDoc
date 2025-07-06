@@ -20,7 +20,10 @@ from aiogram.types import (
     FSInputFile,
     CallbackQuery,
     InlineKeyboardButton,
-    InlineKeyboardMarkup
+    InlineKeyboardMarkup,
+    ReplyKeyboardMarkup,
+    ReplyKeyboardRemove,
+    KeyboardButton
 )
 from aiogram.filters import Command
 from aiogram.fsm.state import State, StatesGroup
@@ -85,6 +88,9 @@ photo_tags = [
     "ОБЩЕЕФОТО"
 ]
 
+# Максимальный размер очереди фото
+MAX_QUEUE_SIZE = 15
+
 # Состояния
 class ReportState(StatesGroup):
     fio = State()
@@ -99,6 +105,17 @@ class ReportState(StatesGroup):
 # Глобальные переменные
 user_sessions = {}
 session_lock = Lock()
+
+# Клавиатура с основными командами
+def get_main_keyboard():
+    return ReplyKeyboardMarkup(
+        keyboard=[
+            [KeyboardButton(text="/help"), KeyboardButton(text="/reset")],
+            [KeyboardButton(text="/generate")]
+        ],
+        resize_keyboard=True,
+        one_time_keyboard=False
+    )
 
 def get_or_create_session(chat_id):
     """Потокобезопасное создание/получение сессии"""
@@ -187,7 +204,10 @@ async def start_command(message: Message, state: FSMContext):
         session["processing"] = False
     
     await state.set_state(ReportState.fio)
-    await message.answer("Введите ФИО координатора:")
+    await message.answer(
+        "Введите ФИО координатора:",
+        reply_markup=get_main_keyboard()
+    )
 
 @router.message(Command("reset"))
 async def reset_session(message: Message, state: FSMContext):
@@ -204,7 +224,10 @@ async def reset_session(message: Message, state: FSMContext):
             del user_sessions[chat_id]
     
     await state.clear()
-    await message.answer("Сессия сброшена. Введите /start для начала.")
+    await message.answer(
+        "Сессия сброшена. Введите /start для начала.",
+        reply_markup=get_main_keyboard()
+    )
 
 @router.message(Command("help"))
 async def help_handler(message: Message):
@@ -213,9 +236,57 @@ async def help_handler(message: Message):
         "Доступные команды:\n"
         "/start - Начать заполнение отчета\n"
         "/reset - Сбросить текущую сессию\n"
-        "/help - Показать эту справку"
+        "/help - Показать эту справку\n"
+        "/generate - Сгенерировать отчет\n\n"
+        "Во время загрузки фото:\n"
+        "• Можно пропустить фото с помощью кнопки\n"
+        "• Если загружено много фото, используйте /generate для принудительной генерации"
     )
-    await message.answer(help_text)
+    await message.answer(help_text, reply_markup=get_main_keyboard())
+
+@router.message(Command("generate"))
+async def force_generate(message: Message, state: FSMContext):
+    """Обработчик команды /generate"""
+    chat_id = message.chat.id
+    session = get_or_create_session(chat_id)
+    
+    with session["lock"]:
+        if not session["photos"]:
+            await message.answer("❌ Нет фото для генерации отчёта!")
+            return
+            
+        # Проверяем, есть ли недостающие фото
+        missing_photos = [tag for tag in photo_tags if tag not in session["photos"]]
+        
+        if missing_photos:
+            # Создаем клавиатуру для подтверждения
+            confirm_markup = InlineKeyboardMarkup(inline_keyboard=[
+                [InlineKeyboardButton(text="✅ Да, сгенерировать", callback_data="force_generate")],
+                [InlineKeyboardButton(text="❌ Нет, продолжить", callback_data="cancel_generate")]
+            ])
+            
+            await message.answer(
+                f"⚠️ У вас загружено только {len(session['photos'])} из {len(photo_tags)} фото. "
+                f"Отсутствуют: {', '.join(missing_photos)}\n"
+                "Всё равно создать отчёт?",
+                reply_markup=confirm_markup
+            )
+        else:
+            await generate_docx(message, chat_id)
+            await state.clear()
+
+@router.callback_query(F.data == "force_generate")
+async def confirm_force_generate(callback: CallbackQuery, state: FSMContext):
+    """Подтверждение принудительной генерации"""
+    await callback.message.delete()
+    await generate_docx(callback.message, callback.message.chat.id)
+    await state.clear()
+
+@router.callback_query(F.data == "cancel_generate")
+async def cancel_force_generate(callback: CallbackQuery):
+    """Отмена принудительной генерации"""
+    await callback.message.delete()
+    await callback.message.answer("Продолжаем загрузку фото...")
 
 # Обработчики состояний
 @router.message(ReportState.fio)
@@ -227,7 +298,7 @@ async def handle_fio(message: Message, state: FSMContext):
         session["fields"]["{}1{}"] = message.text
     
     await state.set_state(ReportState.team)
-    await message.answer("Введите название отряда:")
+    await message.answer("Введите название отряда:", reply_markup=get_main_keyboard())
 
 @router.message(ReportState.team)
 async def handle_team(message: Message, state: FSMContext):
@@ -238,7 +309,7 @@ async def handle_team(message: Message, state: FSMContext):
         session["fields"]["{}2{}"] = message.text
     
     await state.set_state(ReportState.date)
-    await message.answer("Введите дату уборки:")
+    await message.answer("Введите дату уборки:", reply_markup=get_main_keyboard())
 
 @router.message(ReportState.date)
 async def handle_date(message: Message, state: FSMContext):
@@ -249,7 +320,7 @@ async def handle_date(message: Message, state: FSMContext):
         session["fields"]["{3}"] = message.text
     
     await state.set_state(ReportState.address)
-    await message.answer("Введите адрес уборки:")
+    await message.answer("Введите адрес уборки:", reply_markup=get_main_keyboard())
 
 @router.message(ReportState.address)
 async def handle_address(message: Message, state: FSMContext):
@@ -260,7 +331,7 @@ async def handle_address(message: Message, state: FSMContext):
         session["fields"]["{4}"] = message.text
     
     await state.set_state(ReportState.bags)
-    await message.answer("Введите количество мешков:")
+    await message.answer("Введите количество мешков:", reply_markup=get_main_keyboard())
 
 @router.message(ReportState.bags)
 async def handle_bags(message: Message, state: FSMContext):
@@ -271,7 +342,7 @@ async def handle_bags(message: Message, state: FSMContext):
         session["fields"]["{5}"] = message.text
     
     await state.set_state(ReportState.fighters)
-    await message.answer("Введите количество бойцов:")
+    await message.answer("Введите количество бойцов:", reply_markup=get_main_keyboard())
 
 @router.message(ReportState.fighters)
 async def handle_fighters(message: Message, state: FSMContext):
@@ -282,7 +353,11 @@ async def handle_fighters(message: Message, state: FSMContext):
         session["fields"]["{6}"] = message.text
     
     await state.set_state(ReportState.input_photos)
-    await message.answer("Отправляйте фото. Для каждого будет запрошен тип.")
+    await message.answer(
+        "Отправляйте фото. Для каждого будет запрошен тип. "
+        "Можно пропустить фото с помощью кнопки.",
+        reply_markup=get_main_keyboard()
+    )
 
 # Обработчики фото
 @router.message(F.photo)
@@ -292,8 +367,21 @@ async def handle_photo_only(message: Message, state: FSMContext):
     session = get_or_create_session(chat_id)
     
     with session["lock"]:
+        # Проверяем, не переполнена ли очередь
+        if len(session["photo_queue"]) >= MAX_QUEUE_SIZE:
+            await message.answer(
+                f"🚫 Очередь переполнена! Максимум {MAX_QUEUE_SIZE} фото. "
+                "Используйте /generate для генерации отчёта."
+            )
+            return
+            
         session["photo_queue"].append(message.photo[-1].file_id)
         logger.info(f"Фото добавлено в очередь. Всего в очереди: {len(session['photo_queue'])}")
+        
+        # Отправляем обновленный статус
+        progress = f"📊 Прогресс: {len(session['photos'])}/{len(photo_tags)} фото\n"
+        progress += f"⏳ В очереди: {len(session['photo_queue'])} фото"
+        await message.answer(progress)
     
     # Если это первое фото в очереди - начинаем обработку
     if len(session["photo_queue"]) == 1:
@@ -322,6 +410,9 @@ async def process_next_photo(chat_id: int, state: FSMContext):
         [InlineKeyboardButton(text=tag, callback_data=f"tag_{tag}")] 
         for tag in session["remaining_tags"]
     ]
+    # Добавляем кнопку "Пропустить"
+    buttons.append([InlineKeyboardButton(text="⏭ Пропустить фото", callback_data="tag_skip")])
+    
     markup = InlineKeyboardMarkup(inline_keyboard=buttons)
     
     try:
@@ -347,6 +438,29 @@ async def handle_photo_tag(callback: CallbackQuery, state: FSMContext):
     chat_id = callback.message.chat.id
     session = get_or_create_session(chat_id)
     tag = callback.data.replace("tag_", "")
+    
+    # Обработка пропуска фото
+    if tag == "skip":
+        with session["lock"]:
+            if session["photo_queue"]:
+                session["photo_queue"].pop(0)
+            session["current_file_id"] = None
+            session["processing"] = False
+        
+        try:
+            await callback.message.delete()
+        except Exception as e:
+            logger.error(f"Ошибка при удалении сообщения: {e}")
+        
+        await callback.message.answer("⏭ Фото пропущено")
+        
+        # Обрабатываем следующее фото, если есть
+        if session["photo_queue"]:
+            await process_next_photo(chat_id, state)
+        elif not session["remaining_tags"]:
+            await generate_docx(callback.message, chat_id)
+            await state.clear()
+        return
     
     if not session["current_file_id"]:
         await callback.answer("Фото уже обработано")
@@ -385,6 +499,12 @@ async def handle_photo_tag(callback: CallbackQuery, state: FSMContext):
             session["current_file_id"] = None
             session["processing"] = False
         
+        # Отправляем обновленный статус
+        progress = f"📊 Прогресс: {len(session['photos'])}/{len(photo_tags)} фото\n"
+        if session["photo_queue"]:
+            progress += f"⏳ В очереди: {len(session['photo_queue'])} фото"
+        await callback.message.answer(progress)
+        
         # Обрабатываем следующее фото, если есть
         if session["photo_queue"]:
             await process_next_photo(chat_id, state)
@@ -413,7 +533,7 @@ async def ignore_text_messages(message: Message):
     """Игнорирует текст, если это не команда"""
     if not message.text.startswith('/'):
         return
-    await message.answer("Используйте /help для списка команд")
+    await message.answer("Используйте /help для списка команд", reply_markup=get_main_keyboard())
 
 # Генерация документа
 async def replace_image_in_docx(doc_path: str, image_tag: str, new_image_path: str):
@@ -473,7 +593,13 @@ async def generate_docx(message: Message, chat_id: int):
     session = get_or_create_session(chat_id)
     user_temp_dir = os.path.join(TEMP_DIR, str(chat_id))
     os.makedirs(user_temp_dir, exist_ok=True)
-    output_path = os.path.join(user_temp_dir, "Final_Отчет.docx")
+    # Получаем имя координатора из сессии
+    coordinator_name = session["fields"]["{}1{}"]
+    # Удаляем запрещенные символы для имени файла
+    safe_name = "".join(c for c in coordinator_name if c.isalnum() or c in (' ', '_')).rstrip()
+    # Формируем имя файла
+    output_filename = f"{safe_name}_Отчёт.docx"
+    output_path = os.path.join(user_temp_dir, output_filename)
     
     try:
         shutil.copy(TEMPLATE_DOCX, output_path)
@@ -520,7 +646,18 @@ async def generate_docx(message: Message, chat_id: int):
             await message.answer("Ошибка создания отчета")
             return
         
+        # Отправляем документ и очищаем сессию
         await bot.send_document(chat_id, FSInputFile(output_path), caption="Ваш отчет")
+        
+        # Очищаем очередь фото после успешной генерации
+        with session_lock:
+            if chat_id in user_sessions:
+                user_sessions[chat_id]["photo_queue"] = []
+        
+        await message.answer(
+            "Отчёт успешно сгенерирован! Чтобы начать новый, введите /start",
+            reply_markup=get_main_keyboard()
+        )
         
     except Exception as e:
         logger.error(f"Ошибка генерации: {e}", exc_info=True)
