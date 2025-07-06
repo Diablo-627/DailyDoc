@@ -247,25 +247,6 @@ async def generate_command(message: Message, state: FSMContext):
     # Генерируем отчет
     await generate_docx(message, chat_id)
 
-@router.message(Command("status"))
-async def status_command(message: Message, state: FSMContext):
-    """Команда для указания статуса адреса"""
-    chat_id = message.chat.id
-    session = get_or_create_session(chat_id)
-    
-    # Проверяем, был ли сгенерирован отчет
-    if not session["photos"]:
-        await message.answer("Сначала сгенерируйте отчет командой /generate")
-        return
-    
-    # Проверяем, не был ли уже указан статус
-    if session["address_status"]:
-        await message.answer(f"Статус адреса уже указан: {session['address_status']}")
-        return
-    
-    await state.set_state(ReportState.address_status)
-    await message.answer("Укажите статус адреса (Завершён/Ведутся работы):")
-
 # Обработчики состояний
 @router.message(ReportState.fio)
 async def handle_fio(message: Message, state: FSMContext):
@@ -563,7 +544,7 @@ async def replace_image_in_docx(doc_path: str, image_tag: str, new_image_path: s
                     zip_ref.write(file_path, arcname)
 
 
-async def generate_docx(message: Message, chat_id: int, state: FSMContext):  # Добавлен параметр state
+async def generate_docx(message: Message, chat_id: int):
     """Генерация итогового документа"""
     session = get_or_create_session(chat_id)
     user_temp_dir = os.path.join(TEMP_DIR, str(chat_id))
@@ -622,7 +603,7 @@ async def generate_docx(message: Message, chat_id: int, state: FSMContext):  # �
         
         await bot.send_document(chat_id, FSInputFile(output_path), caption="Ваш отчет")
         
-           except Exception as e:
+    except Exception as e:
         logger.error(f"Ошибка генерации: {e}", exc_info=True)
         await message.answer("Ошибка генерации отчета")
     finally:
