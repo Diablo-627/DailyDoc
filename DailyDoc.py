@@ -8,7 +8,7 @@ import tempfile
 from PIL import Image
 from dotenv import load_dotenv
 import xml.etree.ElementTree as ET
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from threading import Lock
 from asyncio import Semaphore
 
@@ -29,6 +29,7 @@ from aiogram.filters import Command
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.storage.memory import MemoryStorage
+from aiogram.client.session.aiohttp import AiohttpSession  # Добавлено
 
 # Для веб-сервера
 from aiohttp import web
@@ -63,11 +64,15 @@ os.makedirs(PHOTOS_DIR, exist_ok=True)
 os.makedirs(TEMP_DIR, exist_ok=True)
 
 # Ограничители параллелизма
-executor = ThreadPoolExecutor(max_workers=3)
-processing_semaphore = Semaphore(3)
+executor = ThreadPoolExecutor(max_workers=5)  # Увеличено количество воркеров
+processing_semaphore = Semaphore(5)  # Увеличено количество одновременных обработок
 
-# Инициализация бота
-bot = Bot(token=API_TOKEN, parse_mode=ParseMode.HTML)
+# Инициализация бота с увеличенными таймаутами
+session = AiohttpSession(
+    read_timeout=60,  # Увеличенный таймаут чтения
+    connect_timeout=30  # Увеличенный таймаут подключения
+)
+bot = Bot(token=API_TOKEN, parse_mode=ParseMode.HTML, session=session)
 dp = Dispatcher(storage=MemoryStorage())
 router = Router()
 dp.include_router(router)
@@ -144,7 +149,8 @@ def get_or_create_session(chat_id):
                 "current_file_id": None,
                 "address_status": None,
                 "lock": Lock(),
-                "processing": False
+                "processing": False,
+                "last_activity": time.time()  # Отслеживание активности
             }
         return user_sessions[chat_id]
 
@@ -153,6 +159,7 @@ def resize_and_crop_image(image_path, target_width_cm, target_height_cm):
     target_width = int(target_width_cm * 37.8)
     target_height = int(target_height_cm * 37.8)
     
+    start_time = time.time()
     with Image.open(image_path) as img:
         if img.mode != 'RGB':
             img = img.convert('RGB')
@@ -175,22 +182,26 @@ def resize_and_crop_image(image_path, target_width_cm, target_height_cm):
         img = img.crop((left, top, right, bottom))
         img = img.resize((target_width, target_height), Image.LANCZOS)
         img.save(image_path, format="JPEG", quality=90, subsampling=0)
-        logger.info(f"Изображение обработано: {target_width}x{target_height} пикселей")
+        
+        elapsed = time.time() - start_time
+        logger.info(f"Изображение обработано за {elapsed:.2f} сек: {target_width}x{target_height} пикселей")
 
 async def download_photo_with_retry(file_id: str, destination_path: str, max_attempts: int = 3) -> bool:
     """Загрузка фото с повторами"""
     for attempt in range(max_attempts):
         try:
+            start_time = time.time()
             file = await bot.get_file(file_id)
             await bot.download_file(file.file_path, destination_path)
             
-            start_time = time.time()
             while not os.path.exists(destination_path):
-                if time.time() - start_time > 30:
+                if time.time() - start_time > 60:  # Увеличенный таймаут
                     logger.error("Таймаут загрузки файла")
                     return False
                 await asyncio.sleep(1)
             
+            elapsed = time.time() - start_time
+            logger.info(f"Фото загружено за {elapsed:.2f} сек")
             return True
             
         except Exception as e:
@@ -215,6 +226,7 @@ async def start_command(message: Message, state: FSMContext):
         session["current_file_id"] = None
         session["address_status"] = None
         session["processing"] = False
+        session["last_activity"] = time.time()
     
     await state.set_state(ReportState.fio)
     await message.answer(
@@ -353,6 +365,7 @@ async def handle_fio(message: Message, state: FSMContext):
     
     with session["lock"]:
         session["fields"]["{}1{}"] = message.text
+        session["last_activity"] = time.time()
     
     await state.set_state(ReportState.team)
     await message.answer("Введите название отряда:", reply_markup=get_main_keyboard())
@@ -364,6 +377,7 @@ async def handle_team(message: Message, state: FSMContext):
     
     with session["lock"]:
         session["fields"]["{}2{}"] = message.text
+        session["last_activity"] = time.time()
     
     await state.set_state(ReportState.date)
     await message.answer("Введите дату уборки:", reply_markup=get_main_keyboard())
@@ -375,6 +389,7 @@ async def handle_date(message: Message, state: FSMContext):
     
     with session["lock"]:
         session["fields"]["{3}"] = message.text
+        session["last_activity"] = time.time()
     
     await state.set_state(ReportState.address)
     await message.answer("Введите адрес уборки:", reply_markup=get_main_keyboard())
@@ -386,6 +401,7 @@ async def handle_address(message: Message, state: FSMContext):
     
     with session["lock"]:
         session["fields"]["{4}"] = message.text
+        session["last_activity"] = time.time()
     
     await state.set_state(ReportState.address_status)
     await message.answer(
@@ -404,6 +420,7 @@ async def handle_address_status(message: Message, state: FSMContext):
     
     with session["lock"]:
         session["address_status"] = message.text
+        session["last_activity"] = time.time()
     
     await state.set_state(ReportState.bags)
     await message.answer("Введите количество мешков:", reply_markup=get_main_keyboard())
@@ -415,6 +432,7 @@ async def handle_bags(message: Message, state: FSMContext):
     
     with session["lock"]:
         session["fields"]["{5}"] = message.text
+        session["last_activity"] = time.time()
     
     await state.set_state(ReportState.fighters)
     await message.answer("Введите количество бойцов:", reply_markup=get_main_keyboard())
@@ -426,6 +444,7 @@ async def handle_fighters(message: Message, state: FSMContext):
     
     with session["lock"]:
         session["fields"]["{6}"] = message.text
+        session["last_activity"] = time.time()
     
     await state.set_state(ReportState.input_photos)
     await message.answer(
@@ -438,10 +457,13 @@ async def handle_fighters(message: Message, state: FSMContext):
 @router.message(F.photo)
 async def handle_photo_only(message: Message, state: FSMContext):
     """Обработчик фото (игнорирует подписи)"""
+    start_time = time.time()
     chat_id = message.chat.id
     session = get_or_create_session(chat_id)
     
     with session["lock"]:
+        session["last_activity"] = time.time()
+        
         # Проверяем, не переполнена ли очередь
         if len(session["photo_queue"]) >= MAX_QUEUE_SIZE:
             await message.answer(
@@ -461,9 +483,13 @@ async def handle_photo_only(message: Message, state: FSMContext):
     # Если это первое фото в очереди - начинаем обработку
     if len(session["photo_queue"]) == 1:
         await process_next_photo(chat_id, state)
+    
+    elapsed = time.time() - start_time
+    logger.info(f"Обработка фото завершена за {elapsed:.2f} сек")
 
 async def process_next_photo(chat_id: int, state: FSMContext):
     """Обработка следующего фото в очереди"""
+    start_time = time.time()
     session = get_or_create_session(chat_id)
     
     with session["lock"]:
@@ -472,6 +498,7 @@ async def process_next_photo(chat_id: int, state: FSMContext):
             
         session["current_file_id"] = session["photo_queue"][0]  # Берем первое фото, но не удаляем из очереди
         session["processing"] = True
+        session["last_activity"] = time.time()
         
         if not session["remaining_tags"]:
             await bot.send_message(chat_id, "Все типы фото использованы! Введите /generate")
@@ -491,6 +518,9 @@ async def process_next_photo(chat_id: int, state: FSMContext):
     markup = InlineKeyboardMarkup(inline_keyboard=buttons)
     
     try:
+        # Сообщаем пользователю, что начали обработку
+        await bot.send_chat_action(chat_id, "typing")
+        
         await bot.send_photo(
             chat_id=chat_id,
             photo=session["current_file_id"],
@@ -506,17 +536,25 @@ async def process_next_photo(chat_id: int, state: FSMContext):
                 session["photo_queue"].pop(0)
             session["current_file_id"] = None
             session["processing"] = False
+    
+    elapsed = time.time() - start_time
+    logger.info(f"Отправка фото для выбора типа завершена за {elapsed:.2f} сек")
 
 @router.callback_query(F.data.startswith("tag_"))
 async def handle_photo_tag(callback: CallbackQuery, state: FSMContext):
     """Обработчик выбора типа фото"""
+    start_time = time.time()
     chat_id = callback.message.chat.id
     session = get_or_create_session(chat_id)
     tag = callback.data.replace("tag_", "")
     
+    # Сообщаем пользователю, что начали обработку
+    await bot.send_chat_action(chat_id, "upload_photo")
+    
     # Обработка пропуска фото
     if tag == "skip":
         with session["lock"]:
+            session["last_activity"] = time.time()
             if session["photo_queue"]:
                 session["photo_queue"].pop(0)
             session["current_file_id"] = None
@@ -534,6 +572,9 @@ async def handle_photo_tag(callback: CallbackQuery, state: FSMContext):
             await process_next_photo(chat_id, state)
         elif not session["remaining_tags"]:
             await generate_docx(callback.message, chat_id)
+        
+        elapsed = time.time() - start_time
+        logger.info(f"Пропуск фото завершен за {elapsed:.2f} сек")
         return
     
     if not session["current_file_id"]:
@@ -545,13 +586,17 @@ async def handle_photo_tag(callback: CallbackQuery, state: FSMContext):
     if await download_photo_with_retry(session["current_file_id"], photo_path):
         width, height = PHOTO_SIZES.get(tag, PHOTO_SIZES["default"])
         
-        async with processing_semaphore:
+        # Обработка в фоновом режиме
+        try:
             loop = asyncio.get_running_loop()
             await loop.run_in_executor(
                 executor,
                 resize_and_crop_image,
                 photo_path, width, height
             )
+        except Exception as e:
+            logger.error(f"Ошибка обработки фото: {e}")
+            await callback.message.answer(f"❌ Ошибка обработки фото: {e}")
         
         # Удаляем сообщение с фото и кнопками
         try:
@@ -563,6 +608,7 @@ async def handle_photo_tag(callback: CallbackQuery, state: FSMContext):
         await callback.message.answer(f"✅ Фото сохранено как: {tag}")
         
         with session["lock"]:
+            session["last_activity"] = time.time()
             # Удаляем обработанное фото из очереди
             if session["photo_queue"]:
                 session["photo_queue"].pop(0)
@@ -588,6 +634,7 @@ async def handle_photo_tag(callback: CallbackQuery, state: FSMContext):
         # Отправляем новое сообщение об ошибке
         await callback.message.answer("❌ Ошибка загрузки фото")
         with session["lock"]:
+            session["last_activity"] = time.time()
             # Удаляем текущее фото из очереди
             if session["photo_queue"]:
                 session["photo_queue"].pop(0)
@@ -599,6 +646,8 @@ async def handle_photo_tag(callback: CallbackQuery, state: FSMContext):
             await process_next_photo(chat_id, state)
 
     await state.set_state(ReportState.input_photos)
+    elapsed = time.time() - start_time
+    logger.info(f"Обработка фото типа '{tag}' завершена за {elapsed:.2f} сек")
 
 # Игнорирование текста (кроме команд)
 @router.message(F.text)
@@ -663,6 +712,7 @@ async def replace_image_in_docx(doc_path: str, image_tag: str, new_image_path: s
 
 async def generate_docx(message: Message, chat_id: int):
     """Генерация итогового документа"""
+    start_time = time.time()
     session = get_or_create_session(chat_id)
     user_temp_dir = os.path.join(TEMP_DIR, str(chat_id))
     os.makedirs(user_temp_dir, exist_ok=True)
@@ -676,6 +726,9 @@ async def generate_docx(message: Message, chat_id: int):
     output_path = os.path.join(user_temp_dir, output_filename)
     
     try:
+        # Сообщаем пользователю, что начали генерацию
+        await bot.send_chat_action(chat_id, "upload_document")
+        
         shutil.copy(TEMPLATE_DOCX, output_path)
         
         # Проверка фото
@@ -685,9 +738,13 @@ async def generate_docx(message: Message, chat_id: int):
             await message.answer(f"Отсутствуют фото: {', '.join(missing_photos)}")
             return
         
-        # Замена изображений
+        # Замена изображений - выполняем параллельно
+        tasks = []
         for tag, image_path in session["photos"].items():
-            await replace_image_in_docx(output_path, tag, image_path)
+            tasks.append(replace_image_in_docx(output_path, tag, image_path))
+        
+        # Ожидаем завершения всех задач
+        await asyncio.gather(*tasks)
         
         # Замена текста
         with tempfile.TemporaryDirectory() as tmp_dir:
@@ -746,14 +803,45 @@ async def generate_docx(message: Message, chat_id: int):
             shutil.rmtree(user_temp_dir)
         except Exception as e:
             logger.error(f"Ошибка очистки: {e}")
+    
+    elapsed = time.time() - start_time
+    logger.info(f"Генерация отчёта завершена за {elapsed:.2f} сек")
 
 # Запуск/остановка
+async def cleanup_old_sessions():
+    """Очистка старых сессий"""
+    while True:
+        try:
+            now = time.time()
+            with session_lock:
+                expired = []
+                for chat_id, session in user_sessions.items():
+                    if now - session.get("last_activity", now) > 3600:  # 1 час бездействия
+                        expired.append(chat_id)
+                
+                for chat_id in expired:
+                    for tag, path in user_sessions[chat_id]["photos"].items():
+                        try:
+                            if os.path.exists(path):
+                                os.remove(path)
+                        except Exception as e:
+                            logger.error(f"Ошибка удаления фото: {e}")
+                    del user_sessions[chat_id]
+                    logger.info(f"Удалена старая сессия: {chat_id}")
+            
+            await asyncio.sleep(300)  # Проверка каждые 5 минут
+        except Exception as e:
+            logger.error(f"Ошибка в cleanup_old_sessions: {e}")
+
 async def on_startup(dispatcher: Dispatcher):
     """Действия при запуске"""
     logger.info("Бот запущен")
     webhook_url = os.getenv("WEBHOOK_URL")
     if webhook_url:
         await bot.set_webhook(webhook_url)
+    
+    # Запуск фоновой задачи для очистки старых сессий
+    asyncio.create_task(cleanup_old_sessions())
 
 async def on_shutdown(dispatcher: Dispatcher):
     """Действия при остановке"""
