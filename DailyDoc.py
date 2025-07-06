@@ -124,7 +124,8 @@ def get_or_create_session(chat_id):
                 "address_status": None,
                 "recipient_username": None,
                 "last_activity": time.time(),  # Таймстемп последней активности
-                "report_generated": False  # Флаг генерации отчета
+                "report_generated": False,  # Флаг генерации отчета
+                "report_path": None  # Путь к сгенерированному отчету
             }
         else:
             # Обновляем время активности при каждом обращении
@@ -149,6 +150,12 @@ def cleanup_inactive_sessions():
                         os.remove(path)
                 except Exception as e:
                     logger.error(f"Ошибка удаления фото: {e}")
+            # Удаляем временный отчет
+            if user_sessions[chat_id]["report_path"] and os.path.exists(user_sessions[chat_id]["report_path"]):
+                try:
+                    os.remove(user_sessions[chat_id]["report_path"])
+                except Exception as e:
+                    logger.error(f"Ошибка удаления отчета: {e}")
             # Удаляем сессию
             del user_sessions[chat_id]
             logger.info(f"Сессия {chat_id} очищена по таймауту")
@@ -230,6 +237,7 @@ async def start_command(message: Message, state: FSMContext):
         session["address_status"] = None
         session["recipient_username"] = None
         session["report_generated"] = False
+        session["report_path"] = None
         session["last_activity"] = time.time()
     
     await state.set_state(ReportState.fio)
@@ -241,12 +249,19 @@ async def reset_session(message: Message, state: FSMContext):
     chat_id = message.chat.id
     with session_lock:
         if chat_id in user_sessions:
+            # Удаляем фото
             for tag, path in user_sessions[chat_id]["photos"].items():
                 try:
                     if os.path.exists(path):
                         os.remove(path)
                 except Exception as e:
                     logger.error(f"Ошибка удаления фото: {e}")
+            # Удаляем отчет
+            if user_sessions[chat_id]["report_path"] and os.path.exists(user_sessions[chat_id]["report_path"]):
+                try:
+                    os.remove(user_sessions[chat_id]["report_path"])
+                except Exception as e:
+                    logger.error(f"Ошибка удаления отчета: {e}")
             del user_sessions[chat_id]
     
     await state.clear()
@@ -260,7 +275,6 @@ async def help_handler(message: Message):
         "/start - Начать заполнение отчета\n"
         "/reset - Сбросить текущую сессию\n"
         "/generate - Сгенерировать отчет (если все фото собраны)\n"
-        "/status - Указать статус адреса после генерации отчета\n"
         "/help - Показать эту справку"
     )
     await message.answer(help_text)
@@ -283,7 +297,7 @@ async def generate_command(message: Message, state: FSMContext):
         session["processing"] = False
     
     # Генерируем отчет
-    await generate_docx(message, chat_id)
+    await generate_docx(message, chat_id, state)
 
 # Обработчики состояний
 @router.message(ReportState.fio)
@@ -503,7 +517,7 @@ async def handle_photo_tag(callback: CallbackQuery, state: FSMContext):
         if session["photo_queue"]:
             await process_next_photo(chat_id, state)
         elif not session["remaining_tags"] or len(session["photos"]) >= MAX_PHOTOS:
-            await generate_docx(callback.message, chat_id)
+            await generate_docx(callback.message, chat_id, state)
     else:
         # Отправляем новое сообщение об ошибке
         await callback.message.answer("❌ Ошибка загрузки фото")
@@ -582,7 +596,7 @@ async def replace_image_in_docx(doc_path: str, image_tag: str, new_image_path: s
                     zip_ref.write(file_path, arcname)
 
 
-async def generate_docx(message: Message, chat_id: int):
+async def generate_docx(message: Message, chat_id: int, state: FSMContext):
     """Генерация итогового документа"""
     session = get_or_create_session(chat_id)
     user_temp_dir = os.path.join(TEMP_DIR, str(chat_id))
@@ -639,46 +653,22 @@ async def generate_docx(message: Message, chat_id: int):
             await message.answer("Ошибка создания отчета")
             return
         
-        await bot.send_document(chat_id, FSInputFile(output_path), caption="Ваш отчет")
-        
-        # Помечаем отчет как сгенерированный
+        # Сохраняем путь к отчету в сессии
         with session["lock"]:
+            session["report_path"] = output_path
             session["report_generated"] = True
             session["last_activity"] = time.time()
         
-        await message.answer("Отчет сгенерирован! Теперь введите /status для указания статуса адреса.")
+        # Запрашиваем статус адреса
+        await state.set_state(ReportState.address_status)
+        await message.answer("Отчет сгенерирован! Теперь укажите статус адреса (Завершён/Ведутся работы):")
         
     except Exception as e:
         logger.error(f"Ошибка генерации: {e}", exc_info=True)
         await message.answer("Ошибка генерации отчета")
     finally:
-        # Очистка временных файлов
-        try:
-            shutil.rmtree(user_temp_dir)
-        except Exception as e:
-            logger.error(f"Ошибка очистки временных файлов: {e}")
-
-@router.message(Command("status"))
-async def status_command(message: Message, state: FSMContext):
-    """Команда для указания статуса адреса"""
-    chat_id = message.chat.id
-    session = get_or_create_session(chat_id)
-    
-    # Проверяем, был ли сгенерирован отчет
-    if not session.get("report_generated"):
-        await message.answer("Сначала сгенерируйте отчет командой /generate")
-        return
-    
-    # Проверяем, не был ли уже указан статус
-    if session["address_status"]:
-        await message.answer(f"Статус адреса уже указан: {session['address_status']}")
-        # Предлагаем перейти к вводу получателя
-        await state.set_state(ReportState.recipient_username)
-        await message.answer("Введите @username получателя:")
-        return
-    
-    await state.set_state(ReportState.address_status)
-    await message.answer("Укажите статус адреса (Завершён/Ведутся работы):")
+        # Не удаляем временные файлы - они понадобятся позже
+        pass
 
 # Обработчики для статуса адреса
 @router.message(ReportState.address_status)
@@ -695,7 +685,7 @@ async def handle_address_status(message: Message, state: FSMContext):
     session["address_status"] = status
     session["last_activity"] = time.time()
     
-    # Переходим сразу к запросу получателя
+    # Переходим к запросу получателя
     await state.set_state(ReportState.recipient_username)
     await message.answer("Статус сохранён. Теперь введите @username получателя (например, @username):")
 
@@ -726,25 +716,45 @@ async def handle_recipient_username(message: Message, state: FSMContext):
     )
     
     try:
-        # Отправляем сообщение
-        await bot.send_message(chat_id=username[1:], text=report_message)  # Убираем @ при отправке
-        await message.answer(f"✅ Статус отправлен пользователю {username}")
+        # Отправляем отчет получателю
+        await bot.send_document(
+            chat_id=username[1:], 
+            document=FSInputFile(session["report_path"]),
+            caption=report_message
+        )
+        
+        # Отправляем копию отправителю
+        await bot.send_document(
+            chat_id=chat_id,
+            document=FSInputFile(session["report_path"]),
+            caption="Ваш отчет"
+        )
+        
+        await message.answer(f"✅ Отчет отправлен пользователю {username}")
+        
     except Exception as e:
         logger.error(f"Ошибка отправки сообщения: {e}")
-        await message.answer(f"❌ Не удалось отправить сообщение пользователю {username}. Ошибка: {e}")
+        await message.answer(f"❌ Не удалось отправить отчет пользователю {username}. Ошибка: {e}")
     
-    # Завершаем сессию
-    await state.clear()
-    with session_lock:
-        if chat_id in user_sessions:
-            # Очищаем сохраненные фото
-            for tag, path in user_sessions[chat_id]["photos"].items():
-                try:
-                    if os.path.exists(path):
-                        os.remove(path)
-                except Exception as e:
-                    logger.error(f"Ошибка удаления фото: {e}")
-            del user_sessions[chat_id]
+    finally:
+        # Очищаем временные файлы
+        try:
+            # Удаляем фото
+            for tag, path in session["photos"].items():
+                if os.path.exists(path):
+                    os.remove(path)
+            # Удаляем отчет
+            if session["report_path"] and os.path.exists(session["report_path"]):
+                os.remove(session["report_path"])
+        except Exception as e:
+            logger.error(f"Ошибка очистки файлов: {e}")
+        
+        # Удаляем сессию
+        with session_lock:
+            if chat_id in user_sessions:
+                del user_sessions[chat_id]
+        
+        await state.clear()
 
 # Запуск/остановка
 async def on_startup(dispatcher: Dispatcher):
