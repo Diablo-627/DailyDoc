@@ -97,10 +97,13 @@ class ReportState(StatesGroup):
     team = State()
     date = State()
     address = State()
+    address_status = State()  # Новое состояние для статуса адреса
+    contact_info = State()    # Новое состояние для контактной информации
     bags = State()
     fighters = State()
     input_photos = State()
     choosing_tag = State()
+    status_sending = State()  # Для отправки статуса
 
 # Глобальные переменные
 user_sessions = {}
@@ -111,10 +114,19 @@ def get_main_keyboard():
     return ReplyKeyboardMarkup(
         keyboard=[
             [KeyboardButton(text="/help"), KeyboardButton(text="/reset")],
-            [KeyboardButton(text="/generate")]
+            [KeyboardButton(text="/generate"), KeyboardButton(text="/status")]
         ],
         resize_keyboard=True,
         one_time_keyboard=False
+    )
+
+def get_status_keyboard():
+    return ReplyKeyboardMarkup(
+        keyboard=[
+            [KeyboardButton(text="Закончен"), KeyboardButton(text="Ведутся работы")]
+        ],
+        resize_keyboard=True,
+        one_time_keyboard=True
     )
 
 def get_or_create_session(chat_id):
@@ -131,6 +143,8 @@ def get_or_create_session(chat_id):
                 "remaining_tags": photo_tags.copy(),
                 "photo_queue": [],
                 "current_file_id": None,
+                "address_status": None,  # Статус адреса
+                "contact_info": None,    # Контактная информация
                 "lock": Lock(),
                 "processing": False
             }
@@ -201,6 +215,8 @@ async def start_command(message: Message, state: FSMContext):
         session["remaining_tags"] = photo_tags.copy()
         session["photo_queue"] = []
         session["current_file_id"] = None
+        session["address_status"] = None
+        session["contact_info"] = None
         session["processing"] = False
     
     await state.set_state(ReportState.fio)
@@ -237,7 +253,8 @@ async def help_handler(message: Message):
         "/start - Начать заполнение отчета\n"
         "/reset - Сбросить текущую сессию\n"
         "/help - Показать эту справку\n"
-        "/generate - Сгенерировать отчет\n\n"
+        "/generate - Сгенерировать отчет\n"
+        "/status - Отправить статус адреса контакту\n\n"
         "Во время загрузки фото:\n"
         "• Можно пропустить фото с помощью кнопки\n"
         "• Если загружено много фото, используйте /generate для принудительной генерации"
@@ -273,20 +290,63 @@ async def force_generate(message: Message, state: FSMContext):
             )
         else:
             await generate_docx(message, chat_id)
-            await state.clear()
 
 @router.callback_query(F.data == "force_generate")
-async def confirm_force_generate(callback: CallbackQuery, state: FSMContext):
+async def confirm_force_generate(callback: CallbackQuery):
     """Подтверждение принудительной генерации"""
     await callback.message.delete()
     await generate_docx(callback.message, callback.message.chat.id)
-    await state.clear()
 
 @router.callback_query(F.data == "cancel_generate")
 async def cancel_force_generate(callback: CallbackQuery):
     """Отмена принудительной генерации"""
     await callback.message.delete()
     await callback.message.answer("Продолжаем загрузку фото...")
+
+@router.message(Command("status"))
+async def status_command(message: Message, state: FSMContext):
+    """Обработчик команды /status"""
+    chat_id = message.chat.id
+    session = get_or_create_session(chat_id)
+    
+    if not session.get("address_status") or not session.get("fields", {}).get("{4}"):
+        await message.answer("❌ Статус адреса не указан. Заполните информацию об адресе.")
+        return
+    
+    await state.set_state(ReportState.status_sending)
+    await message.answer(
+        "Введите Telegram @username контакта, которому отправить статус:",
+        reply_markup=ReplyKeyboardRemove()
+    )
+
+@router.message(ReportState.status_sending)
+async def handle_status_sending(message: Message, state: FSMContext):
+    """Обработка отправки статуса"""
+    chat_id = message.chat.id
+    session = get_or_create_session(chat_id)
+    contact = message.text.strip()
+    
+    # Проверяем формат контакта
+    if not contact.startswith('@'):
+        await message.answer("❌ Контакт должен начинаться с @. Пример: @username")
+        return
+    
+    # Отправляем статус контакту
+    try:
+        address = session["fields"].get("{4}", "неизвестный адрес")
+        status = session.get("address_status", "неизвестный статус")
+        
+        await bot.send_message(
+            contact,
+            f"ℹ️ Статус адреса: {address}\n"
+            f"🔄 Состояние: {status}"
+        )
+        await message.answer(f"✅ Статус успешно отправлен контакту {contact}")
+    except Exception as e:
+        logger.error(f"Ошибка отправки статуса: {e}")
+        await message.answer(f"❌ Не удалось отправить статус контакту {contact}. Проверьте правильность контакта.")
+    
+    await state.clear()
 
 # Обработчики состояний
 @router.message(ReportState.fio)
@@ -329,6 +389,24 @@ async def handle_address(message: Message, state: FSMContext):
     
     with session["lock"]:
         session["fields"]["{4}"] = message.text
+    
+    await state.set_state(ReportState.address_status)
+    await message.answer(
+        "Укажите статус адреса:",
+        reply_markup=get_status_keyboard()
+    )
+
+@router.message(ReportState.address_status)
+async def handle_address_status(message: Message, state: FSMContext):
+    chat_id = message.chat.id
+    session = get_or_create_session(chat_id)
+    
+    if message.text not in ["Закончен", "Ведутся работы"]:
+        await message.answer("Пожалуйста, выберите один из предложенных вариантов", reply_markup=get_status_keyboard())
+        return
+    
+    with session["lock"]:
+        session["address_status"] = message.text
     
     await state.set_state(ReportState.bags)
     await message.answer("Введите количество мешков:", reply_markup=get_main_keyboard())
@@ -459,7 +537,6 @@ async def handle_photo_tag(callback: CallbackQuery, state: FSMContext):
             await process_next_photo(chat_id, state)
         elif not session["remaining_tags"]:
             await generate_docx(callback.message, chat_id)
-            await state.clear()
         return
     
     if not session["current_file_id"]:
@@ -510,7 +587,6 @@ async def handle_photo_tag(callback: CallbackQuery, state: FSMContext):
             await process_next_photo(chat_id, state)
         elif not session["remaining_tags"]:
             await generate_docx(callback.message, chat_id)
-            await state.clear()
     else:
         # Отправляем новое сообщение об ошибке
         await callback.message.answer("❌ Ошибка загрузки фото")
@@ -593,6 +669,7 @@ async def generate_docx(message: Message, chat_id: int):
     session = get_or_create_session(chat_id)
     user_temp_dir = os.path.join(TEMP_DIR, str(chat_id))
     os.makedirs(user_temp_dir, exist_ok=True)
+    
     # Получаем имя координатора из сессии
     coordinator_name = session["fields"]["{}1{}"]
     # Удаляем запрещенные символы для имени файла
@@ -646,8 +723,11 @@ async def generate_docx(message: Message, chat_id: int):
             await message.answer("Ошибка создания отчета")
             return
         
-        # Отправляем документ и очищаем сессию
-        await bot.send_document(chat_id, FSInputFile(output_path), caption="Ваш отчет")
+        await bot.send_document(
+            chat_id, 
+            FSInputFile(output_path, filename=output_filename), 
+            caption=f"Отчёт координатора {coordinator_name}"
+        )
         
         # Очищаем очередь фото после успешной генерации
         with session_lock:
@@ -655,29 +735,20 @@ async def generate_docx(message: Message, chat_id: int):
                 user_sessions[chat_id]["photo_queue"] = []
         
         await message.answer(
-            "Отчёт успешно сгенерирован! Чтобы начать новый, введите /start",
+            "✅ Отчёт успешно сгенерирован!\n"
+            "Теперь вы можете отправить статус адреса контакту с помощью команды /status",
             reply_markup=get_main_keyboard()
         )
         
     except Exception as e:
         logger.error(f"Ошибка генерации: {e}", exc_info=True)
-        await message.answer("Ошибка генерации отчета")
+        await message.answer("❌ Ошибка генерации отчета")
     finally:
-        # Очистка
+        # Очистка временных файлов
         try:
             shutil.rmtree(user_temp_dir)
         except Exception as e:
             logger.error(f"Ошибка очистки: {e}")
-        
-        with session_lock:
-            if chat_id in user_sessions:
-                for tag, path in user_sessions[chat_id]["photos"].items():
-                    try:
-                        if os.path.exists(path):
-                            os.remove(path)
-                    except Exception as e:
-                        logger.error(f"Ошибка удаления фото: {e}")
-                del user_sessions[chat_id]
 
 # Запуск/остановка
 async def on_startup(dispatcher: Dispatcher):
