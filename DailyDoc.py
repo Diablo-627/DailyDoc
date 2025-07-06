@@ -79,6 +79,7 @@ PHOTO_SIZES = {
 }
 
 MAX_PHOTOS = 15  # Максимальное количество фото
+INACTIVITY_TIMEOUT = 600  # 10 минут в секундах
 photo_tags = [
     "ТБ1", "ТБ2",
     "ДО1", "ДО2", "ДО3", "ДО4",
@@ -97,8 +98,8 @@ class ReportState(StatesGroup):
     fighters = State()
     input_photos = State()
     choosing_tag = State()
-    address_status = State()  # Новое состояние для статуса адреса
-    recipient_username = State()  # Новое состояние для получателя
+    address_status = State()
+    recipient_username = State()
 
 # Глобальные переменные
 user_sessions = {}
@@ -120,10 +121,45 @@ def get_or_create_session(chat_id):
                 "current_file_id": None,
                 "lock": Lock(),
                 "processing": False,
-                "address_status": None,  # Добавляем статус адреса
-                "recipient_username": None  # Добавляем получателя
+                "address_status": None,
+                "recipient_username": None,
+                "last_activity": time.time(),  # Таймстемп последней активности
+                "report_generated": False  # Флаг генерации отчета
             }
+        else:
+            # Обновляем время активности при каждом обращении
+            user_sessions[chat_id]["last_activity"] = time.time()
         return user_sessions[chat_id]
+
+def cleanup_inactive_sessions():
+    """Очистка неактивных сессий"""
+    current_time = time.time()
+    inactive_users = []
+    
+    with session_lock:
+        for chat_id, session in user_sessions.items():
+            if current_time - session["last_activity"] > INACTIVITY_TIMEOUT:
+                inactive_users.append(chat_id)
+        
+        for chat_id in inactive_users:
+            # Удаляем связанные файлы
+            for tag, path in user_sessions[chat_id]["photos"].items():
+                try:
+                    if os.path.exists(path):
+                        os.remove(path)
+                except Exception as e:
+                    logger.error(f"Ошибка удаления фото: {e}")
+            # Удаляем сессию
+            del user_sessions[chat_id]
+            logger.info(f"Сессия {chat_id} очищена по таймауту")
+    
+    logger.info(f"Очищено {len(inactive_users)} неактивных сессий")
+
+async def periodic_cleanup():
+    """Периодическая очистка неактивных сессий"""
+    while True:
+        await asyncio.sleep(60)  # Проверка каждую минуту
+        cleanup_inactive_sessions()
 
 def resize_and_crop_image(image_path, target_width_cm, target_height_cm):
     """Обработка изображения с сохранением пропорций"""
@@ -193,6 +229,8 @@ async def start_command(message: Message, state: FSMContext):
         session["processing"] = False
         session["address_status"] = None
         session["recipient_username"] = None
+        session["report_generated"] = False
+        session["last_activity"] = time.time()
     
     await state.set_state(ReportState.fio)
     await message.answer("Введите ФИО координатора:")
@@ -603,6 +641,13 @@ async def generate_docx(message: Message, chat_id: int):
         
         await bot.send_document(chat_id, FSInputFile(output_path), caption="Ваш отчет")
         
+        # Помечаем отчет как сгенерированный
+        with session["lock"]:
+            session["report_generated"] = True
+            session["last_activity"] = time.time()
+        
+        await message.answer("Отчет сгенерирован! Теперь введите /status для указания статуса адреса.")
+        
     except Exception as e:
         logger.error(f"Ошибка генерации: {e}", exc_info=True)
         await message.answer("Ошибка генерации отчета")
@@ -620,7 +665,7 @@ async def status_command(message: Message, state: FSMContext):
     session = get_or_create_session(chat_id)
     
     # Проверяем, был ли сгенерирован отчет
-    if not session["photos"]:
+    if not session.get("report_generated"):
         await message.answer("Сначала сгенерируйте отчет командой /generate")
         return
     
@@ -640,14 +685,15 @@ async def status_command(message: Message, state: FSMContext):
 async def handle_address_status(message: Message, state: FSMContext):
     """Обработка статуса адреса"""
     chat_id = message.chat.id
-    status = message.text.strip()
+    status = message.text.strip().lower()
     
-    if status.lower() not in ["завершён", "ведутся работы"]:
+    if status not in ["завершён", "ведутся работы"]:
         await message.answer("Пожалуйста, укажите 'Завершён' или 'Ведутся работы'.")
         return
     
     session = get_or_create_session(chat_id)
     session["address_status"] = status
+    session["last_activity"] = time.time()
     
     # Переходим сразу к запросу получателя
     await state.set_state(ReportState.recipient_username)
@@ -666,6 +712,7 @@ async def handle_recipient_username(message: Message, state: FSMContext):
         return
     
     session["recipient_username"] = username
+    session["last_activity"] = time.time()
     
     # Формируем сообщение для отправки
     coordinator = session["fields"]["{}1{}"]
@@ -680,7 +727,7 @@ async def handle_recipient_username(message: Message, state: FSMContext):
     
     try:
         # Отправляем сообщение
-        await bot.send_message(chat_id=username, text=report_message)
+        await bot.send_message(chat_id=username[1:], text=report_message)  # Убираем @ при отправке
         await message.answer(f"✅ Статус отправлен пользователю {username}")
     except Exception as e:
         logger.error(f"Ошибка отправки сообщения: {e}")
@@ -703,6 +750,8 @@ async def handle_recipient_username(message: Message, state: FSMContext):
 async def on_startup(dispatcher: Dispatcher):
     """Действия при запуске"""
     logger.info("Бот запущен")
+    asyncio.create_task(periodic_cleanup())  # Запускаем фоновую задачу очистки
+    
     webhook_url = os.getenv("WEBHOOK_URL")
     if webhook_url:
         await bot.set_webhook(webhook_url)
