@@ -5,6 +5,7 @@ import shutil
 import time
 import zipfile
 import tempfile
+import socket  # Добавлено
 from PIL import Image
 from dotenv import load_dotenv
 import xml.etree.ElementTree as ET
@@ -36,6 +37,9 @@ from aiogram.webhook.aiohttp_server import SimpleRequestHandler, setup_applicati
 
 # Загрузка переменных окружения
 load_dotenv()
+
+# Увеличение таймаута сокетов
+socket.setdefaulttimeout(60)
 
 # Настройка логирования
 logging.basicConfig(
@@ -97,13 +101,12 @@ class ReportState(StatesGroup):
     team = State()
     date = State()
     address = State()
-    address_status = State()  # Новое состояние для статуса адреса
-    contact_info = State()    # Новое состояние для контактной информации
+    address_status = State()
     bags = State()
     fighters = State()
     input_photos = State()
     choosing_tag = State()
-    status_sending = State()  # Для отправки статуса
+    status_sending = State()
 
 # Глобальные переменные
 user_sessions = {}
@@ -143,8 +146,7 @@ def get_or_create_session(chat_id):
                 "remaining_tags": photo_tags.copy(),
                 "photo_queue": [],
                 "current_file_id": None,
-                "address_status": None,  # Статус адреса
-                "contact_info": None,    # Контактная информация
+                "address_status": None,
                 "lock": Lock(),
                 "processing": False
             }
@@ -216,7 +218,6 @@ async def start_command(message: Message, state: FSMContext):
         session["photo_queue"] = []
         session["current_file_id"] = None
         session["address_status"] = None
-        session["contact_info"] = None
         session["processing"] = False
     
     await state.set_state(ReportState.fio)
@@ -780,6 +781,12 @@ async def on_shutdown(dispatcher: Dispatcher):
 if __name__ == "__main__":
     app = web.Application()
     
+    # Health check endpoint
+    async def health_check(request):
+        return web.Response(text="OK")
+    
+    app.router.add_get("/health", health_check)
+    
     dp.startup.register(on_startup)
     dp.shutdown.register(on_shutdown)
     
@@ -790,4 +797,7 @@ if __name__ == "__main__":
     webhook_handler.register(app, path="/webhook")
     
     port = int(os.environ.get("PORT", 5000))
-    web.run_app(app, host="0.0.0.0", port=port)
+    logger.info(f"Starting server on port {port}")
+    
+    # Исправленный запуск с поддержкой IPv6
+    web.run_app(app, host="::", port=port)
