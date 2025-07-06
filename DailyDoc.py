@@ -186,6 +186,59 @@ async def check_session_timeout(chat_id: int, state: FSMContext) -> bool:
             return True
     return False
 
+# Функции для работы с изображениями
+async def download_photo_with_retry(file_id: str, destination: str, max_retries: int = 3) -> bool:
+    """Скачивает фото с возможностью повторных попыток"""
+    for attempt in range(max_retries):
+        try:
+            file = await bot.get_file(file_id)
+            await bot.download_file(file.file_path, destination)
+            return True
+        except Exception as e:
+            logger.error(f"Ошибка загрузки фото (попытка {attempt+1}/{max_retries}): {e}")
+            await asyncio.sleep(1)
+    return False
+
+def resize_and_crop_image(image_path: str, target_width_cm: float, target_height_cm: float, dpi: int = 300):
+    """Изменяет размер и обрезает изображение до указанных размеров"""
+    # Конвертация см в пиксели
+    target_width_px = int(target_width_cm * dpi / 2.54)
+    target_height_px = int(target_height_cm * dpi / 2.54)
+    
+    try:
+        with Image.open(image_path) as img:
+            # Определение соотношения сторон
+            img_ratio = img.width / img.height
+            target_ratio = target_width_px / target_height_px
+            
+            # Определение области для обрезки
+            if target_ratio > img_ratio:
+                # Обрезка по вертикали
+                new_height = int(img.width / target_ratio)
+                if new_height > img.height:
+                    new_height = img.height
+                y_offset = (img.height - new_height) // 2
+                crop_box = (0, y_offset, img.width, y_offset + new_height)
+            else:
+                # Обрезка по горизонтали
+                new_width = int(img.height * target_ratio)
+                if new_width > img.width:
+                    new_width = img.width
+                x_offset = (img.width - new_width) // 2
+                crop_box = (x_offset, 0, x_offset + new_width, img.height)
+            
+            # Обрезка и изменение размера
+            img = img.crop(crop_box)
+            img = img.resize((target_width_px, target_height_px), Image.LANCZOS)
+            
+            # Сохранение с оптимизацией
+            if img.mode != 'RGB':
+                img = img.convert('RGB')
+            img.save(image_path, "JPEG", quality=90, optimize=True)
+            logger.info(f"Изображение обработано: {image_path}")
+    except Exception as e:
+        logger.error(f"Ошибка обработки изображения: {e}")
+
 # Обработчики команд
 @router.message(Command("start"))
 async def start_command(message: Message, state: FSMContext):
@@ -535,6 +588,38 @@ async def ignore_text_messages(message: Message, state: FSMContext):
         return
     await message.answer("Используйте /help для списка команд")
 
+# Функция для замены изображений в DOCX
+async def replace_image_in_docx(docx_path: str, tag: str, image_path: str):
+    """Заменяет изображение в DOCX файле по тегу"""
+    try:
+        # Создаем временную директорию
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            # Распаковываем DOCX
+            with zipfile.ZipFile(docx_path, 'r') as zip_ref:
+                zip_ref.extractall(tmp_dir)
+            
+            # Путь к медиа файлам
+            media_dir = os.path.join(tmp_dir, 'word', 'media')
+            os.makedirs(media_dir, exist_ok=True)
+            
+            # Ищем файл для замены
+            target_name = f"{tag}.jpg"
+            target_path = os.path.join(media_dir, target_name)
+            
+            # Заменяем изображение
+            shutil.copy(image_path, target_path)
+            logger.info(f"Изображение заменено: {tag} -> {target_path}")
+            
+            # Перепаковываем DOCX
+            with zipfile.ZipFile(docx_path, 'w') as zip_ref:
+                for root, dirs, files in os.walk(tmp_dir):
+                    for file in files:
+                        file_path = os.path.join(root, file)
+                        arcname = os.path.relpath(file_path, tmp_dir)
+                        zip_ref.write(file_path, arcname)
+    except Exception as e:
+        logger.error(f"Ошибка замены изображения: {e}")
+
 # Генерация документа
 async def generate_docx(message: Message, chat_id: int):
     """Генерация итогового документа"""
@@ -550,15 +635,11 @@ async def generate_docx(message: Message, chat_id: int):
     try:
         shutil.copy(TEMPLATE_DOCX, output_path)
         
-        missing_photos = [tag for tag, path in session["photos"].items() 
-                         if not os.path.exists(path)]
-        if missing_photos:
-            await message.answer(f"Отсутствуют фото: {', '.join(missing_photos)}")
-            return
-        
+        # Заменяем изображения
         for tag, image_path in session["photos"].items():
             await replace_image_in_docx(output_path, tag, image_path)
         
+        # Заменяем текстовые поля
         with tempfile.TemporaryDirectory() as tmp_dir:
             with zipfile.ZipFile(output_path, 'r') as zip_ref:
                 zip_ref.extractall(tmp_dir)
