@@ -5,7 +5,6 @@ import shutil
 import time
 import zipfile
 import tempfile
-import socket  # Добавлено
 from PIL import Image
 from dotenv import load_dotenv
 import xml.etree.ElementTree as ET
@@ -37,9 +36,6 @@ from aiogram.webhook.aiohttp_server import SimpleRequestHandler, setup_applicati
 
 # Загрузка переменных окружения
 load_dotenv()
-
-# Увеличение таймаута сокетов
-socket.setdefaulttimeout(60)
 
 # Настройка логирования
 logging.basicConfig(
@@ -781,11 +777,11 @@ async def on_shutdown(dispatcher: Dispatcher):
 if __name__ == "__main__":
     app = web.Application()
     
-    # Health check endpoint
-    async def health_check(request):
+    # Обязательный обработчик для Render health-check
+    async def handle_root(request):
         return web.Response(text="OK")
     
-    app.router.add_get("/health", health_check)
+    app.router.add_get("/", handle_root)
     
     dp.startup.register(on_startup)
     dp.shutdown.register(on_shutdown)
@@ -798,6 +794,4 @@ if __name__ == "__main__":
     
     port = int(os.environ.get("PORT", 5000))
     logger.info(f"Starting server on port {port}")
-    
-    # Исправленный запуск с поддержкой IPv6
-    web.run_app(app, host="::", port=port)
+    web.run_app(app, host="0.0.0.0", port=port)
