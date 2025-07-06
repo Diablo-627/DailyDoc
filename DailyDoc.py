@@ -87,8 +87,8 @@ photo_tags = [
     "ОБЩЕЕФОТО"
 ]
 
-# Таймаут сессии в секундах (30 минут)
-SESSION_TIMEOUT = 1800
+# Таймаут сессии в секундах (5.30 минут)
+SESSION_TIMEOUT = 330
 
 # Состояния
 class ReportState(StatesGroup):
