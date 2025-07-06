@@ -87,6 +87,9 @@ photo_tags = [
     "ОБЩЕЕФОТО"
 ]
 
+# Таймаут сессии (6 минут)
+SESSION_TIMEOUT = 360
+
 # Состояния
 class ReportState(StatesGroup):
     fio = State()
@@ -97,12 +100,11 @@ class ReportState(StatesGroup):
     fighters = State()
     input_photos = State()
     choosing_tag = State()
-    address_status = State()  # Новое состояние для статуса адреса
-    recipient_username = State()  # Новое состояние для получателя
 
 # Глобальные переменные
 user_sessions = {}
 session_lock = Lock()
+session_timers = {}
 
 def get_or_create_session(chat_id):
     """Потокобезопасное создание/получение сессии"""
@@ -119,11 +121,59 @@ def get_or_create_session(chat_id):
                 "photo_queue": [],
                 "current_file_id": None,
                 "lock": Lock(),
-                "processing": False,
-                "address_status": None,  # Добавляем статус адреса
-                "recipient_username": None  # Добавляем получателя
+                "processing": False
             }
         return user_sessions[chat_id]
+
+async def reset_session_timer(chat_id, state):
+    """Сброс и перезапуск таймера сессии"""
+    # Отменяем существующий таймер
+    if chat_id in session_timers:
+        try:
+            session_timers[chat_id].cancel()
+        except:
+            pass
+    
+    # Создаем новый таймер
+    session_timers[chat_id] = asyncio.create_task(
+        session_timeout_handler(chat_id, state)
+    )
+
+async def session_timeout_handler(chat_id, state):
+    """Обработчик таймаута сессии"""
+    await asyncio.sleep(SESSION_TIMEOUT)
+    
+    # Проверяем, существует ли еще сессия
+    if chat_id not in user_sessions:
+        return
+    
+    # Очищаем сессию
+    with session_lock:
+        if chat_id in user_sessions:
+            # Удаляем временные файлы
+            session = user_sessions[chat_id]
+            for tag, path in session["photos"].items():
+                try:
+                    if os.path.exists(path):
+                        os.remove(path)
+                except Exception as e:
+                    logger.error(f"Ошибка удаления фото: {e}")
+            
+            # Удаляем сессию
+            del user_sessions[chat_id]
+    
+    # Очищаем состояние
+    await state.clear()
+    
+    # Отправляем уведомление пользователю
+    try:
+        await bot.send_message(
+            chat_id,
+            "⏳ Ваша сессия завершена из-за неактивности.\n"
+            "Используйте /start чтобы начать заново."
+        )
+    except Exception as e:
+        logger.error(f"Ошибка отправки сообщения о таймауте: {e}")
 
 def resize_and_crop_image(image_path, target_width_cm, target_height_cm):
     """Обработка изображения с сохранением пропорций"""
@@ -191,9 +241,8 @@ async def start_command(message: Message, state: FSMContext):
         session["photo_queue"] = []
         session["current_file_id"] = None
         session["processing"] = False
-        session["address_status"] = None
-        session["recipient_username"] = None
     
+    await reset_session_timer(chat_id, state)
     await state.set_state(ReportState.fio)
     await message.answer("Введите ФИО координатора:")
 
@@ -211,6 +260,14 @@ async def reset_session(message: Message, state: FSMContext):
                     logger.error(f"Ошибка удаления фото: {e}")
             del user_sessions[chat_id]
     
+    # Отменяем таймер
+    if chat_id in session_timers:
+        try:
+            session_timers[chat_id].cancel()
+            del session_timers[chat_id]
+        except:
+            pass
+    
     await state.clear()
     await message.answer("Сессия сброшена. Введите /start для начала.")
 
@@ -222,7 +279,6 @@ async def help_handler(message: Message):
         "/start - Начать заполнение отчета\n"
         "/reset - Сбросить текущую сессию\n"
         "/generate - Сгенерировать отчет (если все фото собраны)\n"
-        "/status - Указать статус адреса после генерации отчета\n"
         "/help - Показать эту справку"
     )
     await message.answer(help_text)
@@ -245,7 +301,7 @@ async def generate_command(message: Message, state: FSMContext):
         session["processing"] = False
     
     # Генерируем отчет
-    await generate_docx(message, chat_id)
+    await generate_docx(message, chat_id, state)
 
 # Обработчики состояний
 @router.message(ReportState.fio)
@@ -256,6 +312,7 @@ async def handle_fio(message: Message, state: FSMContext):
     with session["lock"]:
         session["fields"]["{}1{}"] = message.text
     
+    await reset_session_timer(chat_id, state)
     await state.set_state(ReportState.team)
     await message.answer("Введите название отряда:")
 
@@ -267,6 +324,7 @@ async def handle_team(message: Message, state: FSMContext):
     with session["lock"]:
         session["fields"]["{}2{}"] = message.text
     
+    await reset_session_timer(chat_id, state)
     await state.set_state(ReportState.date)
     await message.answer("Введите дату уборки:")
 
@@ -278,6 +336,7 @@ async def handle_date(message: Message, state: FSMContext):
     with session["lock"]:
         session["fields"]["{3}"] = message.text
     
+    await reset_session_timer(chat_id, state)
     await state.set_state(ReportState.address)
     await message.answer("Введите адрес уборки:")
 
@@ -289,6 +348,7 @@ async def handle_address(message: Message, state: FSMContext):
     with session["lock"]:
         session["fields"]["{4}"] = message.text
     
+    await reset_session_timer(chat_id, state)
     await state.set_state(ReportState.bags)
     await message.answer("Введите количество мешков:")
 
@@ -300,6 +360,7 @@ async def handle_bags(message: Message, state: FSMContext):
     with session["lock"]:
         session["fields"]["{5}"] = message.text
     
+    await reset_session_timer(chat_id, state)
     await state.set_state(ReportState.fighters)
     await message.answer("Введите количество бойцов:")
 
@@ -311,6 +372,7 @@ async def handle_fighters(message: Message, state: FSMContext):
     with session["lock"]:
         session["fields"]["{6}"] = message.text
     
+    await reset_session_timer(chat_id, state)
     await state.set_state(ReportState.input_photos)
     await message.answer("Отправляйте фото. Для каждого будет запрошен тип.")
 
@@ -320,6 +382,8 @@ async def handle_photo_only(message: Message, state: FSMContext):
     """Обработчик фото (игнорирует подписи)"""
     chat_id = message.chat.id
     session = get_or_create_session(chat_id)
+    
+    await reset_session_timer(chat_id, state)
     
     with session["lock"]:
         # Проверяем, не превышен ли лимит фото
@@ -398,6 +462,8 @@ async def handle_photo_tag(callback: CallbackQuery, state: FSMContext):
     session = get_or_create_session(chat_id)
     tag = callback.data.replace("tag_", "")
     
+    await reset_session_timer(chat_id, state)
+    
     # Обработка пропуска фото
     if tag == "skip":
         try:
@@ -465,7 +531,7 @@ async def handle_photo_tag(callback: CallbackQuery, state: FSMContext):
         if session["photo_queue"]:
             await process_next_photo(chat_id, state)
         elif not session["remaining_tags"] or len(session["photos"]) >= MAX_PHOTOS:
-            await generate_docx(callback.message, chat_id)
+            await generate_docx(callback.message, chat_id, state)
     else:
         # Отправляем новое сообщение об ошибке
         await callback.message.answer("❌ Ошибка загрузки фото")
@@ -484,10 +550,11 @@ async def handle_photo_tag(callback: CallbackQuery, state: FSMContext):
 
 # Игнорирование текста (кроме команд)
 @router.message(F.text)
-async def ignore_text_messages(message: Message):
+async def ignore_text_messages(message: Message, state: FSMContext):
     """Игнорирует текст, если это не команда"""
     if not message.text.startswith('/'):
         return
+    await reset_session_timer(message.chat.id, state)
     await message.answer("Используйте /help для списка команд")
 
 # Генерация документа
@@ -544,7 +611,7 @@ async def replace_image_in_docx(doc_path: str, image_tag: str, new_image_path: s
                     zip_ref.write(file_path, arcname)
 
 
-async def generate_docx(message: Message, chat_id: int):
+async def generate_docx(message: Message, chat_id: int, state: FSMContext):
     """Генерация итогового документа"""
     session = get_or_create_session(chat_id)
     user_temp_dir = os.path.join(TEMP_DIR, str(chat_id))
@@ -603,6 +670,30 @@ async def generate_docx(message: Message, chat_id: int):
         
         await bot.send_document(chat_id, FSInputFile(output_path), caption="Ваш отчет")
         
+        # Очищаем сессию после успешной генерации
+        with session_lock:
+            if chat_id in user_sessions:
+                # Удаляем временные фото
+                for tag, path in user_sessions[chat_id]["photos"].items():
+                    try:
+                        if os.path.exists(path):
+                            os.remove(path)
+                    except Exception as e:
+                        logger.error(f"Ошибка удаления фото: {e}")
+                # Удаляем сессию
+                del user_sessions[chat_id]
+        
+        # Отменяем таймер
+        if chat_id in session_timers:
+            try:
+                session_timers[chat_id].cancel()
+                del session_timers[chat_id]
+            except:
+                pass
+        
+        # Очищаем состояние
+        await state.clear()
+        
     except Exception as e:
         logger.error(f"Ошибка генерации: {e}", exc_info=True)
         await message.answer("Ошибка генерации отчета")
@@ -612,92 +703,6 @@ async def generate_docx(message: Message, chat_id: int):
             shutil.rmtree(user_temp_dir)
         except Exception as e:
             logger.error(f"Ошибка очистки временных файлов: {e}")
-
-@router.message(Command("status"))
-async def status_command(message: Message, state: FSMContext):
-    """Команда для указания статуса адреса"""
-    chat_id = message.chat.id
-    session = get_or_create_session(chat_id)
-    
-    # Проверяем, был ли сгенерирован отчет
-    if not session["photos"]:
-        await message.answer("Сначала сгенерируйте отчет командой /generate")
-        return
-    
-    # Проверяем, не был ли уже указан статус
-    if session["address_status"]:
-        await message.answer(f"Статус адреса уже указан: {session['address_status']}")
-        # Предлагаем перейти к вводу получателя
-        await state.set_state(ReportState.recipient_username)
-        await message.answer("Введите @username получателя:")
-        return
-    
-    await state.set_state(ReportState.address_status)
-    await message.answer("Укажите статус адреса (Завершён/Ведутся работы):")
-
-# Обработчики для статуса адреса
-@router.message(ReportState.address_status)
-async def handle_address_status(message: Message, state: FSMContext):
-    """Обработка статуса адреса"""
-    chat_id = message.chat.id
-    status = message.text.strip()
-    
-    if status.lower() not in ["завершён", "ведутся работы"]:
-        await message.answer("Пожалуйста, укажите 'Завершён' или 'Ведутся работы'.")
-        return
-    
-    session = get_or_create_session(chat_id)
-    session["address_status"] = status
-    
-    # Переходим сразу к запросу получателя
-    await state.set_state(ReportState.recipient_username)
-    await message.answer("Статус сохранён. Теперь введите @username получателя (например, @username):")
-
-@router.message(ReportState.recipient_username)
-async def handle_recipient_username(message: Message, state: FSMContext):
-    """Обработка имени получателя"""
-    chat_id = message.chat.id
-    username = message.text.strip()
-    session = get_or_create_session(chat_id)
-    
-    # Проверяем формат username
-    if not username.startswith('@'):
-        await message.answer("Username должен начинаться с @. Попробуйте еще раз.")
-        return
-    
-    session["recipient_username"] = username
-    
-    # Формируем сообщение для отправки
-    coordinator = session["fields"]["{}1{}"]
-    address = session["fields"]["{4}"]
-    status = session["address_status"]
-    
-    report_message = (
-        f"📋 Отчет по адресу: {address}\n"
-        f"👤 Координатор: {coordinator}\n"
-        f"🔧 Статус: {status.capitalize()}"
-    )
-    
-    try:
-        # Отправляем сообщение
-        await bot.send_message(chat_id=username, text=report_message)
-        await message.answer(f"✅ Статус отправлен пользователю {username}")
-    except Exception as e:
-        logger.error(f"Ошибка отправки сообщения: {e}")
-        await message.answer(f"❌ Не удалось отправить сообщение пользователю {username}. Ошибка: {e}")
-    
-    # Завершаем сессию
-    await state.clear()
-    with session_lock:
-        if chat_id in user_sessions:
-            # Очищаем сохраненные фото
-            for tag, path in user_sessions[chat_id]["photos"].items():
-                try:
-                    if os.path.exists(path):
-                        os.remove(path)
-                except Exception as e:
-                    logger.error(f"Ошибка удаления фото: {e}")
-            del user_sessions[chat_id]
 
 # Запуск/остановка
 async def on_startup(dispatcher: Dispatcher):
@@ -724,6 +729,14 @@ async def on_shutdown(dispatcher: Dispatcher):
     # Очистка сессий
     with session_lock:
         user_sessions.clear()
+    
+    # Отменяем все таймеры
+    for timer in session_timers.values():
+        try:
+            timer.cancel()
+        except:
+            pass
+    session_timers.clear()
 
 # Запуск приложения
 if __name__ == "__main__":
