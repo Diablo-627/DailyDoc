@@ -562,7 +562,8 @@ async def replace_image_in_docx(doc_path: str, image_tag: str, new_image_path: s
                     arcname = os.path.relpath(file_path, tmp_dir)
                     zip_ref.write(file_path, arcname)
 
-async def generate_docx(message: Message, chat_id: int):
+
+async def generate_docx(message: Message, chat_id: int, state: FSMContext):  # Добавлен параметр state
     """Генерация итогового документа"""
     session = get_or_create_session(chat_id)
     user_temp_dir = os.path.join(TEMP_DIR, str(chat_id))
@@ -621,10 +622,7 @@ async def generate_docx(message: Message, chat_id: int):
         
         await bot.send_document(chat_id, FSInputFile(output_path), caption="Ваш отчет")
         
-        # Переходим к запросу статуса адреса
-        await message.answer("Отчет успешно создан! Теперь укажите статус адреса командой /status")
-        
-    except Exception as e:
+           except Exception as e:
         logger.error(f"Ошибка генерации: {e}", exc_info=True)
         await message.answer("Ошибка генерации отчета")
     finally:
@@ -634,22 +632,45 @@ async def generate_docx(message: Message, chat_id: int):
         except Exception as e:
             logger.error(f"Ошибка очистки временных файлов: {e}")
 
+@router.message(Command("status"))
+async def status_command(message: Message, state: FSMContext):
+    """Команда для указания статуса адреса"""
+    chat_id = message.chat.id
+    session = get_or_create_session(chat_id)
+    
+    # Проверяем, был ли сгенерирован отчет
+    if not session["photos"]:
+        await message.answer("Сначала сгенерируйте отчет командой /generate")
+        return
+    
+    # Проверяем, не был ли уже указан статус
+    if session["address_status"]:
+        await message.answer(f"Статус адреса уже указан: {session['address_status']}")
+        # Предлагаем перейти к вводу получателя
+        await state.set_state(ReportState.recipient_username)
+        await message.answer("Введите @username получателя:")
+        return
+    
+    await state.set_state(ReportState.address_status)
+    await message.answer("Укажите статус адреса (Завершён/Ведутся работы):")
+
 # Обработчики для статуса адреса
 @router.message(ReportState.address_status)
 async def handle_address_status(message: Message, state: FSMContext):
     """Обработка статуса адреса"""
     chat_id = message.chat.id
-    status = message.text.strip().lower()
+    status = message.text.strip()
     
-    if status not in ["завершён", "ведутся работы"]:
+    if status.lower() not in ["завершён", "ведутся работы"]:
         await message.answer("Пожалуйста, укажите 'Завершён' или 'Ведутся работы'.")
         return
     
     session = get_or_create_session(chat_id)
     session["address_status"] = status
     
+    # Переходим сразу к запросу получателя
     await state.set_state(ReportState.recipient_username)
-    await message.answer("Введите @username получателя (например, @username):")
+    await message.answer("Статус сохранён. Теперь введите @username получателя (например, @username):")
 
 @router.message(ReportState.recipient_username)
 async def handle_recipient_username(message: Message, state: FSMContext):
