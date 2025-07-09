@@ -180,7 +180,7 @@ async def session_timeout_handler(chat_id, state):
         logger.error(f"Ошибка отправки сообщения о таймауте: {e}")
 
 def resize_and_crop_image(image_path, target_width_cm, target_height_cm):
-    """Масштабирование с компенсацией рамки без обрезки"""
+    """Автоматическое растягивание фото с учетом рамки 7pt"""
     # Константы
     PT_TO_CM = 0.0352778  # 1 pt = 0.0352778 cm
     CM_TO_PX = 37.8       # 1 cm ≈ 37.8 пикселей
@@ -188,21 +188,32 @@ def resize_and_crop_image(image_path, target_width_cm, target_height_cm):
     
     # Расчет с учетом рамки
     frame_cm = FRAME_PT * PT_TO_CM
-    content_width = target_width_cm - 2*frame_cm
-    content_height = target_height_cm - 2*frame_cm
+    inner_width = target_width_cm - 2*frame_cm
+    inner_height = target_height_cm - 2*frame_cm
     
     with Image.open(image_path) as img:
         if img.mode != 'RGB':
             img = img.convert('RGB')
         
-        # 1. Масштабируем содержимое под внутренний размер рамки
-        img.thumbnail(
-            (int(content_width * CM_TO_PX), 
-            int(content_height * CM_TO_PX)),
-            Image.LANCZOS
-        )
+        # Автоматическое растягивание с сохранением пропорций
+        width, height = img.size
+        target_ratio = inner_width / inner_height
+        image_ratio = width / height
         
-        # 2. Создаем белый фон с рамкой
+        if image_ratio > target_ratio:
+            # Широкое изображение - подгоняем по ширине
+            new_height = int(height * (inner_width / width))
+            new_width = int(inner_width * CM_TO_PX)
+            new_height = int(new_height * CM_TO_PX)
+        else:
+            # Высокое изображение - подгоняем по высоте
+            new_width = int(width * (inner_height / height))
+            new_height = int(inner_height * CM_TO_PX)
+            new_width = int(new_width * CM_TO_PX)
+        
+        img = img.resize((new_width, new_height), Image.LANCZOS)
+        
+        # Создаем белый фон с рамкой
         final_img = Image.new(
             'RGB', 
             (int(target_width_cm * CM_TO_PX), 
@@ -210,13 +221,13 @@ def resize_and_crop_image(image_path, target_width_cm, target_height_cm):
             (255, 255, 255)
         )
         
-        # 3. Центрируем изображение
+        # Центрируем изображение
         x_offset = (final_img.width - img.width) // 2
         y_offset = (final_img.height - img.height) // 2
         final_img.paste(img, (x_offset, y_offset))
         
         final_img.save(image_path, format="JPEG", quality=95, subsampling=0)
-        logger.info(f"Масштабировано с сохранением всего изображения")
+        logger.info(f"Фото растянуто с учетом рамки: {img.width}x{img.height}px")
         
 async def download_photo_with_retry(file_id: str, destination_path: str, max_attempts: int = 3) -> bool:
     """Загрузка фото с повторами"""
