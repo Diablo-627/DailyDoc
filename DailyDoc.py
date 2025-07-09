@@ -217,7 +217,7 @@ def resize_and_crop_image(image_path, target_width_cm, target_height_cm):
         
         final_img.save(image_path, format="JPEG", quality=95, subsampling=0)
         logger.info(f"Масштабировано с сохранением всего изображения")
-
+        )
 async def download_photo_with_retry(file_id: str, destination_path: str, max_attempts: int = 3) -> bool:
     """Загрузка фото с повторами"""
     for attempt in range(max_attempts):
