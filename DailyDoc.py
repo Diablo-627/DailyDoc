@@ -180,56 +180,57 @@ async def session_timeout_handler(chat_id, state):
         logger.error(f"Ошибка отправки сообщения о таймауте: {e}")
 
 def resize_and_crop_image(image_path, target_width_cm, target_height_cm):
-    """Обработка изображения с сохранением пропорций и защитой от обрезания важных частей"""
-    # Конвертация см в пиксели (1 см ≈ 37.8 пикс)
-    target_width = int(target_width_cm * 37.8)
-    target_height = int(target_height_cm * 37.8)
+    """Оптимальная обработка для вставки в рамку Word"""
+    # 1. Конвертируем см в пиксели с запасом
+    PX_PER_CM = 37.8
+    FRAME_OVERLAP = 0.3  # 3mm перекрытие рамки
     
+    # Целевой размер ВМЕСТЕ с рамкой
+    target_width_total = int(target_width_cm * PX_PER_CM)
+    target_height_total = int(target_height_cm * PX_PER_CM)
+    
+    # Размер области ВНУТРИ рамки (уменьшаем на двойное перекрытие)
+    target_width_inner = int((target_width_cm - 2*FRAME_OVERLAP/10) * PX_PER_CM)
+    target_height_inner = int((target_height_cm - 2*FRAME_OVERLAP/10) * PX_PER_CM)
+
     with Image.open(image_path) as img:
         if img.mode != 'RGB':
             img = img.convert('RGB')
         
+        # 2. Определяем стратегию обработки
         width, height = img.size
-        target_ratio = target_width / target_height
-        image_ratio = width / height
+        target_ratio = target_width_inner / target_height_inner
         
-        # 1. Сначала определяем область кадрирования БЕЗ отступов
-        if image_ratio > target_ratio:
-            # Широкое изображение - обрезаем бока
-            new_height = height
-            new_width = int(height * target_ratio)
-            left = (width - new_width) / 2
-            top = 0
-            right = left + new_width
-            bottom = height
-        else:
-            # Высокое изображение - обрезаем верх/низ
-            new_width = width
-            new_height = int(width / target_ratio)
-            left = 0
-            top = (height - new_height) / 2
-            right = width
-            bottom = top + new_height
+        # 3. Масштабируем с минимальной обрезкой
+        # Сначала увеличиваем изображение чтобы оно полностью покрыло область
+        scale = max(
+            target_width_total / width,
+            target_height_total / height
+        )
+        scaled_width = int(width * scale)
+        scaled_height = int(height * scale)
         
-        # 2. Добавляем защитные отступы (5% от области кадрирования)
-        SAFE_MARGIN = 0.05  # 5% отступ от краев
-        crop_width = right - left
-        crop_height = bottom - top
+        img = img.resize((scaled_width, scaled_height), Image.LANCZOS)
         
-        left = max(0, int(left + crop_width * SAFE_MARGIN))
-        top = max(0, int(top + crop_height * SAFE_MARGIN))
-        right = min(width, int(right - crop_width * SAFE_MARGIN))
-        bottom = min(height, int(bottom - crop_height * SAFE_MARGIN))
+        # 4. Кадрируем центральную часть (с запасом под рамку)
+        left = (scaled_width - target_width_inner) // 2
+        top = (scaled_height - target_height_inner) // 2
+        right = left + target_width_inner
+        bottom = top + target_height_inner
         
-        # 3. Кадрируем с учетом отступов
         img = img.crop((left, top, right, bottom))
         
-        # 4. Ресайзим до точных размеров
-        img = img.resize((target_width, target_height), Image.LANCZOS)
+        # 5. Добавляем белые поля там, где изображение меньше области
+        if img.size != (target_width_inner, target_height_inner):
+            new_img = Image.new('RGB', (target_width_inner, target_height_inner), (255, 255, 255))
+            new_img.paste(img, (
+                (target_width_inner - img.width) // 2,
+                (target_height_inner - img.height) // 2
+            ))
+            img = new_img
         
-        # 5. Сохраняем с максимальным качеством
         img.save(image_path, format="JPEG", quality=95, subsampling=0)
-        logger.info(f"Изображение обработано с защитными отступами: {target_width}x{target_height} пикселей")
+        logger.info(f"Оптимально обработанное фото: {img.width}x{img.height}px")
 
 async def download_photo_with_retry(file_id: str, destination_path: str, max_attempts: int = 3) -> bool:
     """Загрузка фото с повторами"""
