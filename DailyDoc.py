@@ -74,6 +74,10 @@ dp.include_router(router)
 PHOTO_SIZES = {
     "ТБ1": (10.67, 6.0),
     "ТБ2": (10.67, 6.0),
+    "ПРОЦЕСС1"(9.0,5.06),
+    "ПРОЦЕСС2"(9.0,5.06),
+    "ПРОЦЕСС3"(9.0,5.06),
+    "ПРОЦЕСС4"(9.0,5.06),
     "ОБЩЕЕФОТО": (20.0, 12.0),
     "default": (10.67, 6.0)
 }
@@ -176,7 +180,8 @@ async def session_timeout_handler(chat_id, state):
         logger.error(f"Ошибка отправки сообщения о таймауте: {e}")
 
 def resize_and_crop_image(image_path, target_width_cm, target_height_cm):
-    """Обработка изображения с сохранением пропорций"""
+    """Обработка изображения с сохранением пропорций и защитой от обрезания важных частей"""
+    # Конвертация см в пиксели (1 см ≈ 37.8 пикс)
     target_width = int(target_width_cm * 37.8)
     target_height = int(target_height_cm * 37.8)
     
@@ -188,21 +193,43 @@ def resize_and_crop_image(image_path, target_width_cm, target_height_cm):
         target_ratio = target_width / target_height
         image_ratio = width / height
         
+        # 1. Сначала определяем область кадрирования БЕЗ отступов
         if image_ratio > target_ratio:
+            # Широкое изображение - обрезаем бока
             new_height = height
             new_width = int(height * target_ratio)
             left = (width - new_width) / 2
-            top, right, bottom = 0, left + new_width, height
+            top = 0
+            right = left + new_width
+            bottom = height
         else:
+            # Высокое изображение - обрезаем верх/низ
             new_width = width
             new_height = int(width / target_ratio)
-            left, top = 0, (height - new_height) / 2
-            right, bottom = width, top + new_height
+            left = 0
+            top = (height - new_height) / 2
+            right = width
+            bottom = top + new_height
         
+        # 2. Добавляем защитные отступы (5% от области кадрирования)
+        SAFE_MARGIN = 0.05  # 5% отступ от краев
+        crop_width = right - left
+        crop_height = bottom - top
+        
+        left = max(0, int(left + crop_width * SAFE_MARGIN))
+        top = max(0, int(top + crop_height * SAFE_MARGIN))
+        right = min(width, int(right - crop_width * SAFE_MARGIN))
+        bottom = min(height, int(bottom - crop_height * SAFE_MARGIN))
+        
+        # 3. Кадрируем с учетом отступов
         img = img.crop((left, top, right, bottom))
+        
+        # 4. Ресайзим до точных размеров
         img = img.resize((target_width, target_height), Image.LANCZOS)
-        img.save(image_path, format="JPEG", quality=90, subsampling=0)
-        logger.info(f"Изображение обработано: {target_width}x{target_height} пикселей")
+        
+        # 5. Сохраняем с максимальным качеством
+        img.save(image_path, format="JPEG", quality=95, subsampling=0)
+        logger.info(f"Изображение обработано с защитными отступами: {target_width}x{target_height} пикселей")
 
 async def download_photo_with_retry(file_id: str, destination_path: str, max_attempts: int = 3) -> bool:
     """Загрузка фото с повторами"""
