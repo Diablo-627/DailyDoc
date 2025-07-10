@@ -180,60 +180,45 @@ async def session_timeout_handler(chat_id, state):
         logger.error(f"Ошибка отправки сообщения о таймауте: {e}")
 
 def resize_and_crop_image(image_path, target_width_cm, target_height_cm):
-    """Агрессивное заполнение с касанием рамки по ширине"""
-    # Константы
+    """Агрессивное заполнение изображения до заданного размера без рамки"""
+    # Константа
     CM_TO_PX = 37.8  # 1 cm ≈ 37.8 пикселей
-    PT_TO_CM = 0.0352778  # 1 pt = 0.0352778 cm
-    FRAME_PT = 7  # Толщина рамки
-    
-    # Полные размеры с учетом рамки
-    total_width_px = int(target_width_cm * CM_TO_PX)
-    total_height_px = int(target_height_cm * CM_TO_PX)
-    
-    # Размеры внутри рамки (уменьшаем на толщину рамки)
-    frame_cm = FRAME_PT * PT_TO_CM
-    inner_width_px = int((target_width_cm - 2*frame_cm) * CM_TO_PX)
-    inner_height_px = int((target_height_cm - 2*frame_cm) * CM_TO_PX)
+
+    # Размеры в пикселях
+    target_width_px = int(target_width_cm * CM_TO_PX)
+    target_height_px = int(target_height_cm * CM_TO_PX)
 
     with Image.open(image_path) as img:
         if img.mode != 'RGB':
             img = img.convert('RGB')
-        
-        # 1. Масштабируем фото так, чтобы оно полностью заполнило внутреннюю область
+
+        # Масштабируем с сохранением заполнения (cover)
         width, height = img.size
-        target_ratio = inner_width_px / inner_height_px
-        
-        # Вычисляем масштаб для полного заполнения
+        target_ratio = target_width_px / target_height_px
+
+        # Масштаб: выбираем большее, чтобы покрыть всё
         scale = max(
-            inner_width_px / width,
-            inner_height_px / height
+            target_width_px / width,
+            target_height_px / height
         )
         scaled_width = int(width * scale)
         scaled_height = int(height * scale)
-        
+
         img = img.resize((scaled_width, scaled_height), Image.LANCZOS)
-        
-        # 2. Кадрируем центральную часть (агрессивное заполнение)
-        left = (scaled_width - inner_width_px) // 2
-        top = (scaled_height - inner_height_px) // 2
+
+        # Центрируем и кадрируем
+        left = (scaled_width - target_width_px) // 2
+        top = (scaled_height - target_height_px) // 2
         img = img.crop((
-            left, 
-            top, 
-            left + inner_width_px, 
-            top + inner_height_px
+            left,
+            top,
+            left + target_width_px,
+            top + target_height_px
         ))
-        
-        # 3. Создаем белый фон (имитация рамки)
-        final_img = Image.new('RGB', (total_width_px, total_height_px), (255, 255, 255))
-        # Центрируем обрезанное фото
-        paste_x = (total_width_px - inner_width_px) // 2
-        paste_y = (total_height_px - inner_height_px) // 2
-        final_img.paste(img, (paste_x, paste_y))
-        
-        final_img.save(image_path, format="JPEG", quality=95, subsampling=0)
+
+        img.save(image_path, format="JPEG", quality=95, subsampling=0)
         logger.info(
-            f"Агрессивное заполнение: {inner_width_px}x{inner_height_px}px "
-            f"в рамке {total_width_px}x{total_height_px}px"
+            f"Агрессивное заполнение: {target_width_px}x{target_height_px}px без рамки"
         )
         
 async def download_photo_with_retry(file_id: str, destination_path: str, max_attempts: int = 3) -> bool:
