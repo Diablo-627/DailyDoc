@@ -771,6 +771,7 @@ if __name__ == "__main__":
     
     port = int(os.environ.get("PORT", 5000))
     web.run_app(app, host="0.0.0.0", port=port)
-dp = router  # Экспортируем роутер
+# Экспорт роутера
+router = router # Экспортируем роутер
 
 
