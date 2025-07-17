@@ -411,4 +411,5 @@ async def cmd_garbage_report(message: Message, state: FSMContext):
     await start_garbage_report(message, state)
 
 # Экспорт роутера под именем dp для совместимости
-dp = router
+# Экспорт роутера
+router = router
