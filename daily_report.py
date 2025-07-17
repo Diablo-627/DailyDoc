@@ -245,8 +245,7 @@ async def download_photo_with_retry(file_id: str, destination_path: str, max_att
     return False
 
 # Обработчики команд
-@router.message(Command("start"))
-async def start_command(message: Message, state: FSMContext):
+
     """Обработчик команды /start"""
     chat_id = message.chat.id
     session = get_or_create_session(chat_id)
@@ -770,3 +769,8 @@ if __name__ == "__main__":
     
     port = int(os.environ.get("PORT", 5000))
     web.run_app(app, host="0.0.0.0", port=port)
+dp = router  # Экспортируем роутер
+
+async def start_daily_report(message: types.Message, state: FSMContext):
+    """Функция для запуска сценария из главного бота"""
+    await start_command(message, state)
