@@ -125,6 +125,7 @@ async def process_hours(message: types.Message, state: FSMContext):
         f"📸 Теперь загрузите {total_photos} фото (по 2 на каждый адрес).\n"
         f"Порядок адресов:\n" + "\n".join(
             f"{i+1}. {addr}" for i, addr in enumerate(data['addresses'])
+        )
     )
 
 @router.message(GarbageReportState.INPUT_PHOTOS, F.photo)
