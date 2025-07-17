@@ -18,9 +18,17 @@ from aiogram.types import (
 from docx import Document
 from docx.shared import Cm, Pt, Inches
 from docx.enum.text import WD_ALIGN_PARAGRAPH
+from docx.enum.section import WD_ORIENT
 from docx.oxml.ns import nsdecls
 from docx.oxml import parse_xml
+from docx.oxml.shared import qn
+from docx.oxml.table import CT_Tbl
+from docx.oxml.text.paragraph import CT_P
+from docx.table import Table
+from docx.text.paragraph import Paragraph
+from docx.section import Section
 from PIL import Image
+import copy
 
 logger = logging.getLogger(__name__)
 router = Router()
@@ -29,6 +37,7 @@ router = Router()
 PHOTO_WIDTH = 13.33  # см
 PHOTO_HEIGHT = 7.5   # см
 CM_TO_PX = 37.8      # 1 см ≈ 37.8 пикселей
+TEMPLATE_NAME = "template21.docx"  # Название файла шаблона
 
 class GarbageReportState(StatesGroup):
     DATE = State()
@@ -240,81 +249,162 @@ async def download_and_process_photo(file_id: str, bot: Bot, target_width: float
         img.save(temp_file, format='JPEG', quality=95)
         return temp_file.name
 
+def clone_element(element):
+    """Клонирование элемента документа"""
+    return parse_xml(element.xml)
+
+def find_and_replace_text(doc, placeholder, replacement):
+    """Поиск и замена текста в документе"""
+    # Замена в параграфах
+    for para in doc.paragraphs:
+        if placeholder in para.text:
+            para.text = para.text.replace(placeholder, replacement)
+    
+    # Замена в таблицах
+    for table in doc.tables:
+        for row in table.rows:
+            for cell in row.cells:
+                if placeholder in cell.text:
+                    cell.text = cell.text.replace(placeholder, replacement)
+
+def clone_section(doc, source_section, address, photos, bot):
+    """Клонирование секции с фото для нового адреса"""
+    # Клонируем все элементы секции
+    for element in source_section._element.body:
+        new_element = clone_element(element)
+        doc.element.body.append(new_element)
+    
+    # Заменяем плейсхолдеры в последних добавленных элементах
+    last_index = len(doc.element.body) - 1
+    elements_count = len(source_section._element.body)
+    
+    for i in range(elements_count):
+        idx = last_index - elements_count + i + 1
+        element = doc.element.body[idx]
+        
+        # Обрабатываем параграфы
+        if element.tag.endswith('p'):
+            para = Paragraph(element, doc)
+            if "<<ADDRESS>>" in para.text:
+                para.text = para.text.replace("<<ADDRESS>>", address)
+        
+        # Обрабатываем таблицы
+        elif element.tag.endswith('tbl'):
+            table = Table(element, doc)
+            for row in table.rows:
+                for cell in row.cells:
+                    if "<<ADDRESS>>" in cell.text:
+                        cell.text = cell.text.replace("<<ADDRESS>>", address)
+
 async def generate_garbage_report(message: types.Message, state: FSMContext):
-    """Генерация итогового документа"""
+    """Генерация отчета на основе шаблона с клонированием секций"""
     data = await state.get_data()
     bot = message.bot
     
-    # Создаем временную директорию
     with tempfile.TemporaryDirectory() as temp_dir:
         doc_path = os.path.join(temp_dir, "Отчет_вывоза_мусора.docx")
-        doc = Document()
         
-        # Заголовок документа
-        title = doc.add_paragraph("Отчет вывоза мусора")
-        title.alignment = WD_ALIGN_PARAGRAPH.CENTER
-        title.runs[0].bold = True
-        title.runs[0].font.size = Pt(14)
+        # Загрузка шаблона
+        template_path = TEMPLATE_NAME
+        if not os.path.exists(template_path):
+            await message.answer(f"❌ Шаблон {TEMPLATE_NAME} не найден!")
+            await state.clear()
+            return
+            
+        doc = Document(template_path)
         
-        # Добавляем таблицу с данными
-        table = doc.add_table(rows=1, cols=6)
-        table.style = 'Table Grid'
+        # 1. ЗАМЕНА ОБЩИХ ДАННЫХ -------------------------------------
+        replacements = {
+            "<<DATE>>": data['date'],
+            "<<EQUIPMENT>>": data.get('equipment', ''),
+            "<<GARBAGE_AMOUNT>>": data.get('garbage_amount', ''),
+            "<<PARTICIPANTS>>": data.get('participants', ''),
+            "<<HOURS>>": data.get('hours', '')
+        }
         
-        # Заголовки таблицы
-        headers = [
-            "Дата", "Адрес", "Техника", 
-            "Мусор (т)", "Участники", "Часы"
-        ]
-        hdr_cells = table.rows[0].cells
-        for i, header in enumerate(headers):
-            hdr_cells[i].text = header
-            hdr_cells[i].paragraphs[0].runs[0].bold = True
+        for placeholder, value in replacements.items():
+            find_and_replace_text(doc, placeholder, value)
         
-        # Добавляем данные
+        # 2. ОБРАБОТКА АДРЕСОВ И ФОТО -------------------------------
         addresses = data['addresses']
-        for address in addresses:
-            row_cells = table.add_row().cells
-            row_cells[0].text = data['date']  # Дата
-            row_cells[1].text = address       # Адрес
-            row_cells[2].text = data.get('equipment', '')  # Техника
-            row_cells[3].text = data.get('garbage_amount', '')  # Мусор
-            row_cells[4].text = data.get('participants', '')  # Участники
-            row_cells[5].text = data.get('hours', '')  # Часы
         
-        # Добавляем секции с фото для каждого адреса
-        for address in addresses:
-            # Заголовок адреса
-            doc.add_page_break()
-            addr_para = doc.add_paragraph(f"{data['date']}\n{address}")
-            addr_para.alignment = WD_ALIGN_PARAGRAPH.CENTER
-            addr_para.runs[0].font.size = Pt(14)
-            addr_para.runs[0].font.name = 'Times New Roman'
-            
-            # Добавляем фото
-            photo_paths = []
-            for i, file_id in enumerate(data['photos'].get(address, [])):
-                photo_path = await download_and_process_photo(
-                    file_id, bot, PHOTO_WIDTH, PHOTO_HEIGHT
-                )
-                photo_paths.append(photo_path)
-            
-            # Вставляем фото в документ
-            for photo_path in photo_paths:
-                para = doc.add_paragraph()
-                run = para.add_run()
-                run.add_picture(photo_path, width=Cm(PHOTO_WIDTH), height=Cm(PHOTO_HEIGHT))
-                apply_photo_style(run)
-                os.unlink(photo_path)  # Удаляем временный файл
+        # Находим секцию с фото-шаблоном
+        sample_section = None
+        sample_found = False
         
-        # Сохраняем документ
+        # Проходим по всем секциям документа
+        for section in doc.sections:
+            for element in section.header.paragraphs:
+                if "PHOTO_SECTION" in element.text:
+                    sample_section = section
+                    sample_found = True
+                    break
+            if sample_found:
+                break
+        
+        if sample_section is None:
+            await message.answer("❌ В шаблоне не найдена секция с фото! Добавьте маркер 'PHOTO_SECTION' в колонтитул")
+            await state.clear()
+            return
+        
+        # 3. ДОБАВЛЕНИЕ АДРЕСОВ В ТАБЛИЦУ ----------------------------
+        # Форматируем адреса для ячейки таблицы
+        addresses_text = "\n".join(addresses)
+        
+        # Заменяем плейсхолдер адресов в таблице
+        find_and_replace_text(doc, "<<ADDRESSES>>", addresses_text)
+        
+        # 4. КЛОНИРОВАНИЕ СЕКЦИЙ ДЛЯ ДОПОЛНИТЕЛЬНЫХ АДРЕСОВ ---------
+        if len(addresses) > 1:
+            # Для каждого дополнительного адреса (кроме первого)
+            for address in addresses[1:]:
+                # Клонируем секцию с фото
+                await clone_section(doc, sample_section, address, data['photos'][address], bot)
+                
+                # Добавляем разрыв страницы
+                doc.add_page_break()
+        
+        # 5. ЗАМЕНА ФОТО ДЛЯ ВСЕХ АДРЕСОВ ----------------------------
+        for i, address in enumerate(addresses):
+            # Находим все фото-плейсхолдеры для этого адреса
+            photo_placeholders = [
+                f"<<PHOTO_{i+1}_1>>",
+                f"<<PHOTO_{i+1}_2>>"
+            ]
+            
+            # Обрабатываем каждое фото
+            for j, placeholder in enumerate(photo_placeholders):
+                if j < len(data['photos'][address]):
+                    file_id = data['photos'][address][j]
+                    photo_path = await download_and_process_photo(
+                        file_id, bot, PHOTO_WIDTH, PHOTO_HEIGHT
+                    )
+                    
+                    # Ищем и заменяем плейсхолдер фото
+                    found = False
+                    for para in doc.paragraphs:
+                        if placeholder in para.text:
+                            # Очищаем параграф и вставляем фото
+                            para.text = ''
+                            run = para.add_run()
+                            run.add_picture(photo_path, width=Cm(PHOTO_WIDTH), height=Cm(PHOTO_HEIGHT))
+                            apply_photo_style(run)
+                            os.unlink(photo_path)
+                            found = True
+                            break
+                    
+                    if not found:
+                        logger.warning(f"Не найден плейсхолдер для фото: {placeholder}")
+        
+        # 6. СОХРАНЕНИЕ И ОТПРАВКА -----------------------------------
         doc.save(doc_path)
-        
-        # Отправляем документ пользователю
         await message.answer("✅ Отчет готов!")
         await message.answer_document(FSInputFile(doc_path))
     
     # Завершаем сессию
     await state.clear()
 
-# Экспорт для главного бота
-dp = router
+# Регистрация обработчиков
+@router.message(F.text == "Создать отчет по вывозу мусора")
+async def cmd_garbage_report(message: Message, state: FSMContext):
+    await start_garbage_report(message, state)
