@@ -69,7 +69,7 @@ bot = Bot(token=API_TOKEN, parse_mode=ParseMode.HTML)
 dp = Dispatcher(storage=MemoryStorage())
 router = Router()
 dp.include_router(router)
-async def start_daily_report(message: types.Message, state: FSMContext):
+async def start_daily_report(message: Message, state: FSMContext):
     """Функция для запуска сценария из главного бота"""
     await start_command(message, state)
 # Константы
