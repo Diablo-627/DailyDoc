@@ -318,7 +318,3 @@ async def generate_garbage_report(message: types.Message, state: FSMContext):
 
 # Экспорт для главного бота
 dp = router
-
-async def start_garbage_report(message: types.Message, state: FSMContext):
-    """Функция для запуска из главного бота"""
-    await start_garbage_report(message, state)
