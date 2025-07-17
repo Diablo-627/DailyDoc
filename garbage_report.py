@@ -409,3 +409,6 @@ async def generate_garbage_report(message: types.Message, state: FSMContext):
 @router.message(F.text == "Создать отчет по вывозу мусора")
 async def cmd_garbage_report(message: Message, state: FSMContext):
     await start_garbage_report(message, state)
+
+# Экспорт роутера под именем dp для совместимости
+dp = router
