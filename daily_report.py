@@ -69,7 +69,9 @@ bot = Bot(token=API_TOKEN, parse_mode=ParseMode.HTML)
 dp = Dispatcher(storage=MemoryStorage())
 router = Router()
 dp.include_router(router)
-
+async def start_daily_report(message: types.Message, state: FSMContext):
+    """Функция для запуска сценария из главного бота"""
+    await start_command(message, state)
 # Константы
 PHOTO_SIZES = {
     "ТБ1": (10.4,7.4),
@@ -771,6 +773,4 @@ if __name__ == "__main__":
     web.run_app(app, host="0.0.0.0", port=port)
 dp = router  # Экспортируем роутер
 
-async def start_daily_report(message: types.Message, state: FSMContext):
-    """Функция для запуска сценария из главного бота"""
-    await start_command(message, state)
+
