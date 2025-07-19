@@ -60,8 +60,9 @@ os.makedirs(TEMP_DIR, exist_ok=True)
 executor = ThreadPoolExecutor(max_workers=3)
 processing_semaphore = Semaphore(3)
 
-# Инициализация роутера
-daily_router = Router()  # Change from 'router' to 'daily_router'
+# Инициализация бота и роутера
+bot = Bot(token=API_TOKEN, parse_mode=ParseMode.HTML)
+daily_router = Router()
 
 # Константы
 PHOTO_SIZES = {
@@ -237,6 +238,7 @@ async def download_photo_with_retry(file_id: str, destination_path: str, max_att
     
     return False
 
+@daily_router.message(Command("start"))
 async def start_daily_report(message: Message, state: FSMContext):
     """Функция для запуска сценария из главного бота"""
     chat_id = message.chat.id
@@ -711,4 +713,3 @@ async def generate_docx(message: Message, chat_id: int, state: FSMContext):
             shutil.rmtree(user_temp_dir)
         except Exception as e:
             logger.error(f"Ошибка очистки временных файлов: {e}")
-
