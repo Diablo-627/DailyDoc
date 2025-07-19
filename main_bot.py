@@ -6,12 +6,12 @@ from aiogram.filters import Command
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.storage.memory import MemoryStorage
 
-# Измененный импорт - импортируем роутеры напрямую
+# Импорт роутеров
 from daily_report import router as daily_router
 from garbage_report import router as garbage_router
 
 # Настройка логирования
-logging.basicConfig(level=logging.INFO)
+logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(name)s - %(levelname)s - %(message)s")
 logger = logging.getLogger(__name__)
 
 # Инициализация бота
@@ -19,7 +19,7 @@ bot = Bot(token=os.getenv("API_TOKEN"))
 storage = MemoryStorage()
 main_dp = Dispatcher(storage=storage)
 
-# Регистрация роутеров других модулей
+# Регистрация роутеров
 main_dp.include_router(daily_router)
 main_dp.include_router(garbage_router)
 
@@ -50,10 +50,14 @@ async def handle_garbage_report(message: types.Message, state: FSMContext):
 
 async def main():
     """Главная функция для запуска бота"""
+    # Удаляем существующий вебхук перед запуском поллинга
+    await bot.delete_webhook(drop_pending_updates=True)
+    logger.info("Вебхук успешно удален, запускаем поллинг...")
+    
+    # Запускаем поллинг
     await main_dp.start_polling(bot, skip_updates=True)
 
 if __name__ == "__main__":
-    # Запуск бота с обработкой исключений
     try:
         asyncio.run(main())
     except KeyboardInterrupt:
