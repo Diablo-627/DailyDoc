@@ -61,7 +61,7 @@ executor = ThreadPoolExecutor(max_workers=3)
 processing_semaphore = Semaphore(3)
 
 # Инициализация роутера
-router = Router()
+daily_router = Router()  # Change from 'router' to 'daily_router'
 
 # Константы
 PHOTO_SIZES = {
