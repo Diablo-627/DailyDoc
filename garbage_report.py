@@ -47,7 +47,7 @@ async def start_garbage_report(message: types.Message, state: FSMContext):
         reply_markup=ReplyKeyboardRemove()
     )
 
-@router.message(GarbageReportState.DATE)
+@garbage_router.message(GarbageReportState.DATE)
 async def process_date(message: types.Message, state: FSMContext):
     """Обработка даты"""
     if not re.match(r'^\d{2}\.\d{2}\.\d{4}$', message.text):
@@ -64,7 +64,7 @@ async def process_date(message: types.Message, state: FSMContext):
         "Ул. Центральная, д. 8"
     )
 
-@router.message(GarbageReportState.ADDRESSES)
+@garbage_router.message(GarbageReportState.ADDRESSES)
 async def process_addresses(message: types.Message, state: FSMContext):
     """Обработка списка адресов"""
     addresses = [addr.strip() for addr in message.text.split('\n') if addr.strip()]
@@ -80,28 +80,28 @@ async def process_addresses(message: types.Message, state: FSMContext):
     await state.set_state(GarbageReportState.EQUIPMENT)
     await message.answer("🚛 Введите задействованную технику:")
 
-@router.message(GarbageReportState.EQUIPMENT)
+@garbage_router.message(GarbageReportState.EQUIPMENT)
 async def process_equipment(message: types.Message, state: FSMContext):
     """Обработка информации о технике"""
     await state.update_data(equipment=message.text)
     await state.set_state(GarbageReportState.GARBAGE_AMOUNT)
     await message.answer("🗑️ Введите количество вывезенного мусора (в тоннах):")
 
-@router.message(GarbageReportState.GARBAGE_AMOUNT)
+@garbage_router.message(GarbageReportState.GARBAGE_AMOUNT)
 async def process_garbage_amount(message: types.Message, state: FSMContext):
     """Обработка объема мусора"""
     await state.update_data(garbage_amount=message.text)
     await state.set_state(GarbageReportState.PARTICIPANTS)
     await message.answer("👥 Введите количество участников:")
 
-@router.message(GarbageReportState.PARTICIPANTS)
+@garbage_router.message(GarbageReportState.PARTICIPANTS)
 async def process_participants(message: types.Message, state: FSMContext):
     """Обработка количества участников"""
     await state.update_data(participants=message.text)
     await state.set_state(GarbageReportState.HOURS)
     await message.answer("⏱️ Введите количество часов работы техники:")
 
-@router.message(GarbageReportState.HOURS)
+@garbage_router.message(GarbageReportState.HOURS)
 async def process_hours(message: types.Message, state: FSMContext):
     """Обработка информации о часах работы"""
     await state.update_data(hours=message.text)
@@ -117,7 +117,7 @@ async def process_hours(message: types.Message, state: FSMContext):
         )
     )
 
-@router.message(GarbageReportState.INPUT_PHOTOS, F.photo)
+@garbage_router.message(GarbageReportState.INPUT_PHOTOS, F.photo)
 async def process_photo_upload(message: types.Message, state: FSMContext):
     """Обработка загруженных фото"""
     data = await state.get_data()
@@ -151,7 +151,7 @@ async def process_photo_upload(message: types.Message, state: FSMContext):
         reply_markup=keyboard
     )
 
-@router.callback_query(GarbageReportState.PHOTO_ASSIGNMENT, F.data.startswith("address_"))
+@garbage_router.callback_query(GarbageReportState.PHOTO_ASSIGNMENT, F.data.startswith("address_"))
 async def assign_photo_to_address(callback: types.CallbackQuery, state: FSMContext):
     """Привязка фото к адресу"""
     address = callback.data.split("_", 1)[1]
@@ -324,5 +324,4 @@ async def generate_garbage_report(message: types.Message, state: FSMContext):
     # Завершаем сессию
     await state.clear()
 
-# Экспорт роутера
-router = router
+
