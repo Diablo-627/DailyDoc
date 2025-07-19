@@ -9,9 +9,8 @@ from aiogram.webhook.aiohttp_server import SimpleRequestHandler, setup_applicati
 from aiohttp import web
 
 # Import routers at top level to avoid circular imports
-from daily_report import daily_router
-from garbage_report import garbage_router
-
+from daily_report import daily_router, start_daily_report
+from garbage_report import garbage_router, start_garbage_report
 # Setup logging
 logging.basicConfig(
     level=logging.INFO,
