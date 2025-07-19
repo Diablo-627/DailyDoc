@@ -5,7 +5,7 @@ from aiogram.filters import Command
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.storage.memory import MemoryStorage
 
-# Измененный импорт - импортируем роутеры напрямую
+# Импорт роутеров напрямую
 from daily_report import router as daily_router
 from garbage_report import router as garbage_router
 
