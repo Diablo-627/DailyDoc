@@ -14,7 +14,7 @@ from threading import Lock
 from asyncio import Semaphore
 
 # Импорты aiogram
-from aiogram import Bot, Dispatcher, Router, F
+from aiogram import Bot, types, F, Router
 from aiogram.enums import ParseMode, ContentType
 from aiogram.types import (
     Message,
@@ -27,10 +27,6 @@ from aiogram.filters import Command
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.storage.memory import MemoryStorage
-
-# Для веб-сервера
-from aiohttp import web
-from aiogram.webhook.aiohttp_server import SimpleRequestHandler, setup_application
 
 # Загрузка переменных окружения
 load_dotenv()
@@ -64,24 +60,19 @@ os.makedirs(TEMP_DIR, exist_ok=True)
 executor = ThreadPoolExecutor(max_workers=3)
 processing_semaphore = Semaphore(3)
 
-# Инициализация бота
-bot = Bot(token=API_TOKEN, parse_mode=ParseMode.HTML)
-dp = Dispatcher(storage=MemoryStorage())
+# Инициализация роутера
 router = Router()
-dp.include_router(router)
-async def start_daily_report(message: Message, state: FSMContext):
-    """Функция для запуска сценария из главного бота"""
-    await start_command(message, state)
+
 # Константы
 PHOTO_SIZES = {
-    "ТБ1": (10.4,7.4),
-    "ТБ2": (10.4,7.4),
-    "ПРОЦЕСС1": (10.4,7.4),
-    "ПРОЦЕСС2": (10.4,7.4),
-    "ПРОЦЕСС3": (10.4,7.4),
-    "ПРОЦЕСС4": (10.4,7.4),
+    "ТБ1": (10.4, 7.4),
+    "ТБ2": (10.4, 7.4),
+    "ПРОЦЕСС1": (10.4, 7.4),
+    "ПРОЦЕСС2": (10.4, 7.4),
+    "ПРОЦЕСС3": (10.4, 7.4),
+    "ПРОЦЕСС4": (10.4, 7.4),
     "ОБЩЕЕФОТО": (20.0, 12.0),
-    "default": (10.4,7.4)
+    "default": (10.4, 7.4)
 }
 
 MAX_PHOTOS = 15  # Максимальное количество фото
@@ -246,9 +237,8 @@ async def download_photo_with_retry(file_id: str, destination_path: str, max_att
     
     return False
 
-# Обработчики команд
-
-    """Обработчик команды /start"""
+async def start_daily_report(message: Message, state: FSMContext):
+    """Функция для запуска сценария из главного бота"""
     chat_id = message.chat.id
     session = get_or_create_session(chat_id)
     
@@ -722,56 +712,5 @@ async def generate_docx(message: Message, chat_id: int, state: FSMContext):
         except Exception as e:
             logger.error(f"Ошибка очистки временных файлов: {e}")
 
-# Запуск/остановка
-async def on_startup(dispatcher: Dispatcher):
-    """Действия при запуске"""
-    logger.info("Бот запущен")
-    webhook_url = os.getenv("WEBHOOK_URL")
-    if webhook_url:
-        await bot.set_webhook(webhook_url)
-
-async def on_shutdown(dispatcher: Dispatcher):
-    """Действия при остановке"""
-    logger.info("Бот останавливается")
-    await bot.delete_webhook()
-    
-    # Очистка временных файлов
-    for root, dirs, files in os.walk(BASE_DIR):
-        for file in files:
-            if file.endswith((".jpg", ".docx")):
-                try:
-                    os.remove(os.path.join(root, file))
-                except Exception as e:
-                    logger.error(f"Ошибка очистки: {e}")
-    
-    # Очистка сессий
-    with session_lock:
-        user_sessions.clear()
-    
-    # Отменяем все таймеры
-    for timer in session_timers.values():
-        try:
-            timer.cancel()
-        except:
-            pass
-    session_timers.clear()
-
-# Запуск приложения
-if __name__ == "__main__":
-    app = web.Application()
-    
-    dp.startup.register(on_startup)
-    dp.shutdown.register(on_shutdown)
-    
-    webhook_handler = SimpleRequestHandler(
-        dispatcher=dp,
-        bot=bot,
-    )
-    webhook_handler.register(app, path="/webhook")
-    
-    port = int(os.environ.get("PORT", 5000))
-    web.run_app(app, host="0.0.0.0", port=port)
 # Экспорт роутера
-router = router # Экспортируем роутер
-
-
+router = router
