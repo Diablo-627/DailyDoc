@@ -1,11 +1,12 @@
 import logging
 import os
+import asyncio
 from aiogram import Bot, Dispatcher, types
 from aiogram.filters import Command
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.storage.memory import MemoryStorage
 
-# Импорт роутеров напрямую
+# Измененный импорт - импортируем роутеры напрямую
 from daily_report import router as daily_router
 from garbage_report import router as garbage_router
 
@@ -47,6 +48,15 @@ async def handle_garbage_report(message: types.Message, state: FSMContext):
     from garbage_report import start_garbage_report
     await start_garbage_report(message, state)
 
+async def main():
+    """Главная функция для запуска бота"""
+    await main_dp.start_polling(bot, skip_updates=True)
+
 if __name__ == "__main__":
-    from aiogram import executor
-    executor.start_polling(main_dp, skip_updates=True)
+    # Запуск бота с обработкой исключений
+    try:
+        asyncio.run(main())
+    except KeyboardInterrupt:
+        logger.info("Бот остановлен пользователем")
+    except Exception as e:
+        logger.error(f"Ошибка запуска бота: {e}", exc_info=True)
