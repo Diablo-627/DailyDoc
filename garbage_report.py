@@ -43,7 +43,7 @@ async def start_garbage_report(message: types.Message, state: FSMContext):
     await state.clear()
     await state.set_state(GarbageReportState.DATE)
     await message.answer(
-        "📅 Введите дату вывоза мусора (в формате ДД.ММ.ГГГГ):",
+        "📅 Введите дату вывоза мусора:",
         reply_markup=ReplyKeyboardRemove()
     )
 
@@ -51,13 +51,6 @@ async def start_garbage_report(message: types.Message, state: FSMContext):
 async def process_date(message: types.Message, state: FSMContext):
     """Обработка даты (принимает любой формат)"""
     user_input = message.text.strip()
-    
-    # Опционально: преобразование к формату ДД.ММ.ГГГГ (если нужно)
-    normalized_date = normalize_date(user_input)  # Функция приведена ниже
-    
-    await state.update_data(
-        date=normalized_date if normalized_date else user_input  # Сохраняем преобразованное или исходное
-    )
     await state.set_state(GarbageReportState.ADDRESSES)
     await message.answer(
         "🏠 Введите адреса (каждый адрес с новой строки):\n"
