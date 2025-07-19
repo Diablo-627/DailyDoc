@@ -5,6 +5,7 @@ from aiogram import Bot, Dispatcher, types
 from aiogram.filters import Command
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.storage.memory import MemoryStorage
+from aiogram.webhook.aiohttp_server import SimpleRequestHandler, setup_application
 
 # Импорт роутеров
 from daily_report import router as daily_router
@@ -48,14 +49,54 @@ async def handle_garbage_report(message: types.Message, state: FSMContext):
     from garbage_report import start_garbage_report
     await start_garbage_report(message, state)
 
-async def main():
-    """Главная функция для запуска бота"""
-    # Удаляем существующий вебхук перед запуском поллинга
+async def on_startup(bot: Bot):
+    """Действия при запуске бота"""
+    webhook_url = os.getenv("WEBHOOK_URL")  # Полный URL вашего вебхука
+    await bot.set_webhook(
+        url=webhook_url,
+        drop_pending_updates=True,
+        allowed_updates=main_dp.resolve_used_update_types()
+    )
+    logger.info(f"Вебхук установлен на {webhook_url}")
+
+async def on_shutdown(bot: Bot):
+    """Действия при остановке бота"""
     await bot.delete_webhook(drop_pending_updates=True)
-    logger.info("Вебхук успешно удален, запускаем поллинг...")
+    logger.info("Вебхук удален")
+
+async def main():
+    """Главная функция для запуска бота в режиме вебхука"""
+    from aiohttp import web
     
-    # Запускаем поллинг
-    await main_dp.start_polling(bot, skip_updates=True)
+    # Создаем aiohttp приложение
+    app = web.Application()
+    
+    # Настраиваем вебхук
+    webhook_requests_handler = SimpleRequestHandler(
+        dispatcher=main_dp,
+        bot=bot,
+    )
+    
+    # Регистрируем обработчик вебхука
+    webhook_requests_handler.register(app, path="/webhook")
+    
+    # Настраиваем обработчики запуска/остановки
+    app.on_startup.append(on_startup)
+    app.on_shutdown.append(on_shutdown)
+    
+    # Настраиваем приложение aiogram
+    setup_application(app, main_dp, bot=bot)
+    
+    # Запускаем сервер
+    runner = web.AppRunner(app)
+    await runner.setup()
+    site = web.TCPSite(runner, host="0.0.0.0", port=8080)
+    await site.start()
+    
+    logger.info("Сервер вебхука запущен")
+    
+    # Бесконечный цикл для работы сервера
+    await asyncio.Event().wait()
 
 if __name__ == "__main__":
     try:
