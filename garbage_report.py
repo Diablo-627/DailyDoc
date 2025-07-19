@@ -20,7 +20,7 @@ from docx.oxml import parse_xml
 from PIL import Image
 
 logger = logging.getLogger(__name__)
-router = Router()
+garbage_router = Router()  # Change from 'router' to 'garbage_router'
 
 # Константы
 PHOTO_WIDTH = 13.33  # см
