@@ -4,7 +4,6 @@ import asyncio
 import logging
 import shutil
 import tempfile
-from datetime import datetime
 from aiogram import Bot, types, F, Router
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
@@ -16,19 +15,9 @@ from aiogram.types import (
     ReplyKeyboardRemove
 )
 from docx import Document
-from docx.shared import Cm, Pt, Inches
-from docx.enum.text import WD_ALIGN_PARAGRAPH
-from docx.enum.section import WD_ORIENT
-from docx.oxml.ns import nsdecls
+from docx.shared import Cm
 from docx.oxml import parse_xml
-from docx.oxml.shared import qn
-from docx.oxml.table import CT_Tbl
-from docx.oxml.text.paragraph import CT_P
-from docx.table import Table
-from docx.text.paragraph import Paragraph
-from docx.section import Section
 from PIL import Image
-import copy
 
 logger = logging.getLogger(__name__)
 router = Router()
@@ -250,10 +239,6 @@ async def download_and_process_photo(file_id: str, bot: Bot, target_width: float
         img.save(temp_file, format='JPEG', quality=95)
         return temp_file.name
 
-def clone_element(element):
-    """Клонирование элемента документа"""
-    return parse_xml(element.xml)
-
 def find_and_replace_text(doc, placeholder, replacement):
     """Поиск и замена текста в документе"""
     # Замена в параграфах
@@ -268,37 +253,8 @@ def find_and_replace_text(doc, placeholder, replacement):
                 if placeholder in cell.text:
                     cell.text = cell.text.replace(placeholder, replacement)
 
-def clone_section(doc, source_section, address, photos, bot):
-    """Клонирование секции с фото для нового адреса"""
-    # Клонируем все элементы секции
-    for element in source_section._element.body:
-        new_element = clone_element(element)
-        doc.element.body.append(new_element)
-    
-    # Заменяем плейсхолдеры в последних добавленных элементах
-    last_index = len(doc.element.body) - 1
-    elements_count = len(source_section._element.body)
-    
-    for i in range(elements_count):
-        idx = last_index - elements_count + i + 1
-        element = doc.element.body[idx]
-        
-        # Обрабатываем параграфы
-        if element.tag.endswith('p'):
-            para = Paragraph(element, doc)
-            if "<<ADDRESS>>" in para.text:
-                para.text = para.text.replace("<<ADDRESS>>", address)
-        
-        # Обрабатываем таблицы
-        elif element.tag.endswith('tbl'):
-            table = Table(element, doc)
-            for row in table.rows:
-                for cell in row.cells:
-                    if "<<ADDRESS>>" in cell.text:
-                        cell.text = cell.text.replace("<<ADDRESS>>", address)
-
 async def generate_garbage_report(message: types.Message, state: FSMContext):
-    """Генерация отчета на основе шаблона с клонированием секций"""
+    """Генерация отчета на основе шаблона"""
     data = await state.get_data()
     bot = message.bot
     
@@ -314,7 +270,7 @@ async def generate_garbage_report(message: types.Message, state: FSMContext):
             
         doc = Document(template_path)
         
-        # 1. ЗАМЕНА ОБЩИХ ДАННЫХ -------------------------------------
+        # 1. ЗАМЕНА ОБЩИХ ДАННЫХ
         replacements = {
             "<<DATE>>": data['date'],
             "<<EQUIPMENT>>": data.get('equipment', ''),
@@ -326,55 +282,18 @@ async def generate_garbage_report(message: types.Message, state: FSMContext):
         for placeholder, value in replacements.items():
             find_and_replace_text(doc, placeholder, value)
         
-        # 2. ОБРАБОТКА АДРЕСОВ И ФОТО -------------------------------
+        # 2. ОБРАБОТКА АДРЕСОВ И ФОТО
         addresses = data['addresses']
         
-        # Находим секцию с фото-шаблоном
-        sample_section = None
-        sample_found = False
-        
-        # Проходим по всем секциям документа
-        for section in doc.sections:
-            for element in section.header.paragraphs:
-                if "PHOTO_SECTION" in element.text:
-                    sample_section = section
-                    sample_found = True
-                    break
-            if sample_found:
-                break
-        
-        if sample_section is None:
-            await message.answer("❌ В шаблоне не найдена секция с фото! Добавьте маркер 'PHOTO_SECTION' в колонтитул")
-            await state.clear()
-            return
-        
-        # 3. ДОБАВЛЕНИЕ АДРЕСОВ В ТАБЛИЦУ ----------------------------
         # Форматируем адреса для ячейки таблицы
         addresses_text = "\n".join(addresses)
-        
-        # Заменяем плейсхолдер адресов в таблице
         find_and_replace_text(doc, "<<ADDRESSES>>", addresses_text)
         
-        # 4. КЛОНИРОВАНИЕ СЕКЦИЙ ДЛЯ ДОПОЛНИТЕЛЬНЫХ АДРЕСОВ ---------
-        if len(addresses) > 1:
-            # Для каждого дополнительного адреса (кроме первого)
-            for address in addresses[1:]:
-                # Клонируем секцию с фото
-                await clone_section(doc, sample_section, address, data['photos'][address], bot)
-                
-                # Добавляем разрыв страницы
-                doc.add_page_break()
-        
-        # 5. ЗАМЕНА ФОТО ДЛЯ ВСЕХ АДРЕСОВ ----------------------------
+        # 3. ЗАМЕНА ФОТО
         for i, address in enumerate(addresses):
-            # Находим все фото-плейсхолдеры для этого адреса
-            photo_placeholders = [
-                f"<<PHOTO_{i+1}_1>>",
-                f"<<PHOTO_{i+1}_2>>"
-            ]
-            
             # Обрабатываем каждое фото
-            for j, placeholder in enumerate(photo_placeholders):
+            for j in range(2):  # По 2 фото на адрес
+                placeholder = f"<<PHOTO_{i+1}_{j+1}>>"
                 if j < len(data['photos'][address]):
                     file_id = data['photos'][address][j]
                     photo_path = await download_and_process_photo(
@@ -397,7 +316,7 @@ async def generate_garbage_report(message: types.Message, state: FSMContext):
                     if not found:
                         logger.warning(f"Не найден плейсхолдер для фото: {placeholder}")
         
-        # 6. СОХРАНЕНИЕ И ОТПРАВКА -----------------------------------
+        # 4. СОХРАНЕНИЕ И ОТПРАВКА
         doc.save(doc_path)
         await message.answer("✅ Отчет готов!")
         await message.answer_document(FSInputFile(doc_path))
@@ -405,11 +324,5 @@ async def generate_garbage_report(message: types.Message, state: FSMContext):
     # Завершаем сессию
     await state.clear()
 
-# Регистрация обработчиков
-@router.message(F.text == "Создать отчет по вывозу мусора")
-async def cmd_garbage_report(message: Message, state: FSMContext):
-    await start_garbage_report(message, state)
-
-# Экспорт роутера под именем dp для совместимости
 # Экспорт роутера
 router = router
