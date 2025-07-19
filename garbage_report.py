@@ -49,12 +49,15 @@ async def start_garbage_report(message: types.Message, state: FSMContext):
 
 @garbage_router.message(GarbageReportState.DATE)
 async def process_date(message: types.Message, state: FSMContext):
-    """Обработка даты"""
-    if not re.match(r'^\d{2}\.\d{2}\.\d{4}$', message.text):
-        await message.answer("❌ Неверный формат даты. Используйте ДД.ММ.ГГГГ")
-        return
-        
-    await state.update_data(date=message.text)
+    """Обработка даты (принимает любой формат)"""
+    user_input = message.text.strip()
+    
+    # Опционально: преобразование к формату ДД.ММ.ГГГГ (если нужно)
+    normalized_date = normalize_date(user_input)  # Функция приведена ниже
+    
+    await state.update_data(
+        date=normalized_date if normalized_date else user_input  # Сохраняем преобразованное или исходное
+    )
     await state.set_state(GarbageReportState.ADDRESSES)
     await message.answer(
         "🏠 Введите адреса (каждый адрес с новой строки):\n"
@@ -63,6 +66,26 @@ async def process_date(message: types.Message, state: FSMContext):
         "Пр. Мира, д. 15\n"
         "Ул. Центральная, д. 8"
     )
+
+def normalize_date(date_str: str) -> str | None:
+    """Пытается привести дату к формату ДД.ММ.ГГГГ (возвращает None при неудаче)"""
+    from datetime import datetime
+    
+    # Поддерживаемые форматы
+    formats = [
+        "%d.%m.%Y", "%d.%m.%y",  # 19.07.2025 / 19.07.25
+        "%d/%m/%Y", "%d/%m/%y",    # 19/07/2025 / 19/07/25
+        "%d-%m-%Y", "%d-%m-%y",    # 19-07-2025 / 19-07-25
+        "%Y.%m.%d", "%y.%m.%d"     # 2025.07.19 / 25.07.19 (обратный формат)
+    ]
+    
+    for fmt in formats:
+        try:
+            dt = datetime.strptime(date_str, fmt)
+            return dt.strftime("%d.%m.%Y")  # Единый формат
+        except ValueError:
+            continue
+    return None  # Не удалось распознать
 
 @garbage_router.message(GarbageReportState.ADDRESSES)
 async def process_addresses(message: types.Message, state: FSMContext):
