@@ -20,7 +20,7 @@ from docx.oxml import parse_xml
 from PIL import Image
 
 logger = logging.getLogger(__name__)
-garbage_router = Router()  # Change from 'router' to 'garbage_router'
+garbage_router = Router()
 
 # Константы
 PHOTO_WIDTH = 13.33  # см
@@ -107,7 +107,6 @@ async def process_hours(message: types.Message, state: FSMContext):
     await state.update_data(hours=message.text)
     data = await state.get_data()
     
-    # Подготовка к приему фото
     total_photos = len(data['addresses']) * 2
     await state.set_state(GarbageReportState.INPUT_PHOTOS)
     await message.answer(
@@ -125,16 +124,13 @@ async def process_photo_upload(message: types.Message, state: FSMContext):
     photo_counter = data['photo_counter'] + 1
     total_photos = len(addresses) * 2
     
-    # Сохраняем file_id фото
     await state.update_data(
         current_photo=message.photo[-1].file_id,
         photo_counter=photo_counter
     )
     
-    # Создаем клавиатуру с адресами
     keyboard = InlineKeyboardMarkup(inline_keyboard=[])
     for address in addresses:
-        # Показываем сколько фото уже привязано к адресу
         photo_count = len(data['photos'].get(address, []))
         if photo_count < 2:
             keyboard.inline_keyboard.append([
@@ -158,7 +154,6 @@ async def assign_photo_to_address(callback: types.CallbackQuery, state: FSMConte
     data = await state.get_data()
     current_photo = data['current_photo']
     
-    # Обновляем данные
     photos = data['photos'].copy()
     photos[address].append(current_photo)
     photo_counter = data['photo_counter']
@@ -167,13 +162,11 @@ async def assign_photo_to_address(callback: types.CallbackQuery, state: FSMConte
     await state.update_data(photos=photos)
     await callback.answer(f"Фото привязано к адресу: {address}")
     
-    # Удаляем сообщение с кнопками
     try:
         await callback.message.delete()
     except:
         pass
     
-    # Проверяем завершение
     if photo_counter >= total_photos:
         await generate_garbage_report(callback.message, state)
         return
@@ -186,13 +179,11 @@ async def assign_photo_to_address(callback: types.CallbackQuery, state: FSMConte
 
 def apply_photo_style(run):
     """Применение стилей к фото в документе"""
-    # Скошенные углы
     effect = parse_xml(
         r'<a:prstGeom prst="roundRect" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"/>'
     )
     run._element.xpath('.//pic:spPr')[0].append(effect)
     
-    # Белая рамка
     ln = parse_xml(
         r'<a:ln w="12700" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main">'
         r'<a:solidFill><a:srgbClr val="FFFFFF"/></a:solidFill>'
@@ -202,21 +193,16 @@ def apply_photo_style(run):
 
 async def download_and_process_photo(file_id: str, bot: Bot, target_width: float, target_height: float):
     """Скачивание и обработка фото"""
-    # Скачивание фото
     file = await bot.get_file(file_id)
     photo_data = await bot.download_file(file.file_path)
     
-    # Обработка в памяти
     with Image.open(photo_data) as img:
         if img.mode != 'RGB':
             img = img.convert('RGB')
         
-        # Расчет размеров в пикселях
         target_width_px = int(target_width * CM_TO_PX)
         target_height_px = int(target_height * CM_TO_PX)
         
-        # Агрессивное заполнение
-        width, height = img.size
         scale = max(
             target_width_px / width,
             target_height_px / height
@@ -234,19 +220,16 @@ async def download_and_process_photo(file_id: str, bot: Bot, target_width: float
             top + target_height_px
         ))
         
-        # Сохранение во временный файл
         temp_file = tempfile.NamedTemporaryFile(delete=False, suffix='.jpg')
         img.save(temp_file, format='JPEG', quality=95)
         return temp_file.name
 
 def find_and_replace_text(doc, placeholder, replacement):
     """Поиск и замена текста в документе"""
-    # Замена в параграфах
     for para in doc.paragraphs:
         if placeholder in para.text:
             para.text = para.text.replace(placeholder, replacement)
     
-    # Замена в таблицах
     for table in doc.tables:
         for row in table.rows:
             for cell in row.cells:
@@ -261,7 +244,6 @@ async def generate_garbage_report(message: types.Message, state: FSMContext):
     with tempfile.TemporaryDirectory() as temp_dir:
         doc_path = os.path.join(temp_dir, "Отчет_вывоза_мусора.docx")
         
-        # Загрузка шаблона
         template_path = TEMPLATE_NAME
         if not os.path.exists(template_path):
             await message.answer(f"❌ Шаблон {TEMPLATE_NAME} не найден!")
@@ -270,7 +252,6 @@ async def generate_garbage_report(message: types.Message, state: FSMContext):
             
         doc = Document(template_path)
         
-        # 1. ЗАМЕНА ОБЩИХ ДАННЫХ
         replacements = {
             "<<DATE>>": data['date'],
             "<<EQUIPMENT>>": data.get('equipment', ''),
@@ -282,17 +263,12 @@ async def generate_garbage_report(message: types.Message, state: FSMContext):
         for placeholder, value in replacements.items():
             find_and_replace_text(doc, placeholder, value)
         
-        # 2. ОБРАБОТКА АДРЕСОВ И ФОТО
         addresses = data['addresses']
-        
-        # Форматируем адреса для ячейки таблицы
         addresses_text = "\n".join(addresses)
         find_and_replace_text(doc, "<<ADDRESSES>>", addresses_text)
         
-        # 3. ЗАМЕНА ФОТО
         for i, address in enumerate(addresses):
-            # Обрабатываем каждое фото
-            for j in range(2):  # По 2 фото на адрес
+            for j in range(2):
                 placeholder = f"<<PHOTO_{i+1}_{j+1}>>"
                 if j < len(data['photos'][address]):
                     file_id = data['photos'][address][j]
@@ -300,11 +276,9 @@ async def generate_garbage_report(message: types.Message, state: FSMContext):
                         file_id, bot, PHOTO_WIDTH, PHOTO_HEIGHT
                     )
                     
-                    # Ищем и заменяем плейсхолдер фото
                     found = False
                     for para in doc.paragraphs:
                         if placeholder in para.text:
-                            # Очищаем параграф и вставляем фото
                             para.text = ''
                             run = para.add_run()
                             run.add_picture(photo_path, width=Cm(PHOTO_WIDTH), height=Cm(PHOTO_HEIGHT))
@@ -316,12 +290,11 @@ async def generate_garbage_report(message: types.Message, state: FSMContext):
                     if not found:
                         logger.warning(f"Не найден плейсхолдер для фото: {placeholder}")
         
-        # 4. СОХРАНЕНИЕ И ОТПРАВКА
         doc.save(doc_path)
         await message.answer("✅ Отчет готов!")
         await message.answer_document(FSInputFile(doc_path))
     
-    # Завершаем сессию
     await state.clear()
 
-
+# Экспорт для использования в других модулях
+__all__ = ['garbage_router', 'start_garbage_report']
