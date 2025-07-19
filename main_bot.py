@@ -6,102 +6,115 @@ from aiogram.filters import Command
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.storage.memory import MemoryStorage
 from aiogram.webhook.aiohttp_server import SimpleRequestHandler, setup_application
+from aiohttp import web
 
-# Импорт роутеров
-from daily_report import router as daily_router
-from garbage_report import router as garbage_router
+# Import routers at top level to avoid circular imports
+from daily_report import start_daily_report
+from garbage_report import start_garbage_report
 
-# Настройка логирования
-logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(name)s - %(levelname)s - %(message)s")
+# Setup logging
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
+    datefmt="%Y-%m-%d %H:%M:%S"
+)
 logger = logging.getLogger(__name__)
 
-# Инициализация бота
+# Initialize bot and dispatcher
 bot = Bot(token=os.getenv("API_TOKEN"))
 storage = MemoryStorage()
 main_dp = Dispatcher(storage=storage)
 
-# Регистрация роутеров
-main_dp.include_router(daily_router)
+# Register routers
+main_dp.include_router(daily_router)  # Assuming these are defined in their modules
 main_dp.include_router(garbage_router)
 
-@main_dp.message(Command("start"))
+@main_dp.message(Command("start", "help"))
 async def start_command(message: types.Message, state: FSMContext):
-    """Обработчик команды /start с выбором типа отчета"""
+    """Main menu with report type selection"""
     keyboard = types.ReplyKeyboardMarkup(
         keyboard=[
             [types.KeyboardButton(text="📅 Ежедневный отчет")],
             [types.KeyboardButton(text="🗑️ Отчет по вывозу мусора")]
         ],
-        resize_keyboard=True
+        resize_keyboard=True,
+        one_time_keyboard=True
     )
-    await message.answer("Выберите тип отчета:", reply_markup=keyboard)
+    await message.answer(
+        "Выберите тип отчета:",
+        reply_markup=keyboard
+    )
     await state.clear()
 
 @main_dp.message(lambda message: message.text == "📅 Ежедневный отчет")
 async def handle_daily_report(message: types.Message, state: FSMContext):
-    """Запуск сценария ежедневного отчета"""
-    from daily_report import start_daily_report
+    """Handle daily report request"""
     await start_daily_report(message, state)
 
 @main_dp.message(lambda message: message.text == "🗑️ Отчет по вывозу мусора")
 async def handle_garbage_report(message: types.Message, state: FSMContext):
-    """Запуск сценария отчета по вывозу мусора"""
-    from garbage_report import start_garbage_report
+    """Handle garbage report request"""
     await start_garbage_report(message, state)
 
+@main_dp.message(Command("cancel"))
+async def cancel_handler(message: types.Message, state: FSMContext):
+    """Cancel any ongoing operation"""
+    await state.clear()
+    await message.answer(
+        "Действие отменено",
+        reply_markup=types.ReplyKeyboardRemove()
+    )
+
 async def on_startup(app: web.Application):
-    """Действия при запуске бота"""
-    webhook_url = os.getenv("WEBHOOK_URL")  # Полный URL вашего вебхука
+    """Webhook setup on startup"""
+    webhook_url = os.getenv("WEBHOOK_URL")
+    if not webhook_url:
+        logger.error("WEBHOOK_URL environment variable is not set!")
+        return
+    
     await bot.set_webhook(
         url=webhook_url,
         drop_pending_updates=True,
         allowed_updates=main_dp.resolve_used_update_types()
     )
-    logger.info(f"Вебхук установлен на {webhook_url}")
+    logger.info(f"Webhook configured for {webhook_url}")
 
 async def on_shutdown(app: web.Application):
-    """Действия при остановке бота"""
+    """Cleanup on shutdown"""
     await bot.delete_webhook(drop_pending_updates=True)
-    logger.info("Вебхук удален")
+    await storage.close()
+    logger.info("Bot stopped. Webhook removed and storage closed.")
 
 async def main():
-    """Главная функция для запуска бота в режиме вебхука"""
-    from aiohttp import web
-    
-    # Создаем aiohttp приложение
+    """Main entry point for webhook setup"""
     app = web.Application()
     
-    # Настраиваем вебхук
-    webhook_requests_handler = SimpleRequestHandler(
-        dispatcher=main_dp,
-        bot=bot,
-    )
+    # Configure webhook handler
+    webhook_handler = SimpleRequestHandler(main_dp, bot)
+    webhook_handler.register(app, path="/webhook")
     
-    # Регистрируем обработчик вебхука
-    webhook_requests_handler.register(app, path="/webhook")
-    
-    # Настраиваем обработчики запуска/остановки
+    # Setup startup/shutdown hooks
     app.on_startup.append(on_startup)
     app.on_shutdown.append(on_shutdown)
     
-    # Настраиваем приложение aiogram
+    # Mount dispatcher
     setup_application(app, main_dp, bot=bot)
     
-    # Запускаем сервер
+    # Start server
     runner = web.AppRunner(app)
     await runner.setup()
     site = web.TCPSite(runner, host="0.0.0.0", port=8080)
     await site.start()
     
-    logger.info("Сервер вебхука запущен")
+    logger.info("Webhook server started on port 8080")
     
-    # Бесконечный цикл для работы сервера
+    # Keep running
     await asyncio.Event().wait()
 
 if __name__ == "__main__":
     try:
         asyncio.run(main())
     except KeyboardInterrupt:
-        logger.info("Бот остановлен пользователем")
+        logger.info("Bot stopped by user")
     except Exception as e:
-        logger.error(f"Ошибка запуска бота: {e}", exc_info=True)
+        logger.critical(f"Critical error: {e}", exc_info=True)
