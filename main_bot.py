@@ -49,7 +49,7 @@ async def handle_garbage_report(message: types.Message, state: FSMContext):
     from garbage_report import start_garbage_report
     await start_garbage_report(message, state)
 
-async def on_startup(bot: Bot):
+async def on_startup(app: web.Application):
     """Действия при запуске бота"""
     webhook_url = os.getenv("WEBHOOK_URL")  # Полный URL вашего вебхука
     await bot.set_webhook(
@@ -59,7 +59,7 @@ async def on_startup(bot: Bot):
     )
     logger.info(f"Вебхук установлен на {webhook_url}")
 
-async def on_shutdown(bot: Bot):
+async def on_shutdown(app: web.Application):
     """Действия при остановке бота"""
     await bot.delete_webhook(drop_pending_updates=True)
     logger.info("Вебхук удален")
