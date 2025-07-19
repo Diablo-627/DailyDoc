@@ -19,6 +19,7 @@ from docx.shared import Cm
 from docx.oxml import parse_xml
 from PIL import Image
 from datetime import datetime
+import xml.etree.ElementTree as ET
 
 logger = logging.getLogger(__name__)
 garbage_router = Router()
@@ -49,26 +50,24 @@ async def start_garbage_report(message: types.Message, state: FSMContext):
     )
 
 def normalize_date(date_str: str) -> str | None:
-    """Пытается привести дату к формату ДД.ММ.ГГГГ (возвращает None при неудаче)"""
-    # Поддерживаемые форматы
+    """Пытается привести дату к формату ДД.ММ.ГГГГ"""
     formats = [
-        "%d.%m.%Y", "%d.%m.%y",  # 19.07.2025 / 19.07.25
-        "%d/%m/%Y", "%d/%m/%y",    # 19/07/2025 / 19/07/25
-        "%d-%m-%Y", "%d-%m-%y",    # 19-07-2025 / 19-07-25
-        "%Y.%m.%d", "%y.%m.%d"     # 2025.07.19 / 25.07.19 (обратный формат)
+        "%d.%m.%Y", "%d.%m.%y", "%d/%m/%Y", "%d/%m/%y", 
+        "%d-%m-%Y", "%d-%m-%y", "%Y.%m.%d", "%y.%m.%d",
+        "%d %m %Y", "%d %m %y", "%d/%m/%Y", "%d/%m/%y"
     ]
     
     for fmt in formats:
         try:
             dt = datetime.strptime(date_str, fmt)
-            return dt.strftime("%d.%m.%Y")  # Единый формат
+            return dt.strftime("%d.%m.%Y")
         except ValueError:
             continue
-    return None  # Не удалось распознать
+    return None
 
 @garbage_router.message(GarbageReportState.DATE)
 async def process_date(message: types.Message, state: FSMContext):
-    """Обработка даты (принимает любой формат)"""
+    """Обработка даты"""
     user_input = message.text.strip()
     normalized_date = normalize_date(user_input)
     
@@ -146,11 +145,16 @@ async def handle_non_photo_input(message: types.Message):
 
 @garbage_router.message(GarbageReportState.INPUT_PHOTOS, F.photo)
 async def process_photo_upload(message: types.Message, state: FSMContext):
-    """Обработка загруженных фото"""
+    """Обработка загруженных фото (игнорируем подписи)"""
     data = await state.get_data()
     addresses = data['addresses']
     photo_counter = data['photo_counter'] + 1
     total_photos = len(addresses) * 2
+    
+    # Проверка на превышение лимита фото
+    if photo_counter > total_photos:
+        await message.answer(f"✅ Все {total_photos} фото уже загружены. Идет генерация отчета...")
+        return
     
     await state.update_data(
         current_photo=message.photo[-1].file_id,
@@ -168,7 +172,6 @@ async def process_photo_upload(message: types.Message, state: FSMContext):
                 )
             ])
     
-    # Если все фото уже распределены (не должно происходить, но на всякий случай)
     if not keyboard.inline_keyboard:
         await message.answer("❌ Все фото уже распределены!")
         return
@@ -273,17 +276,33 @@ async def download_and_process_photo(file_id: str, bot: Bot, target_width: float
             os.unlink(temp_input.name)
             return temp_output.name
 
-def find_and_replace_text(doc, placeholder, replacement):
-    """Поиск и замена текста в документе"""
-    for para in doc.paragraphs:
-        if placeholder in para.text:
-            para.text = para.text.replace(placeholder, replacement)
-    
-    for table in doc.tables:
-        for row in table.rows:
-            for cell in row.cells:
-                if placeholder in cell.text:
-                    cell.text = cell.text.replace(placeholder, replacement)
+def replace_text_in_docx(doc_path: str, replacements: dict):
+    """Замена текста в docx файле"""
+    with tempfile.TemporaryDirectory() as tmp_dir:
+        with zipfile.ZipFile(doc_path, 'r') as zip_ref:
+            zip_ref.extractall(tmp_dir)
+        
+        document_xml_path = os.path.join(tmp_dir, 'word', 'document.xml')
+        tree = ET.parse(document_xml_path)
+        root = tree.getroot()
+        
+        namespaces = {'w': 'http://schemas.openxmlformats.org/wordprocessingml/2006/main'}
+        ET.register_namespace('w', namespaces['w'])
+        
+        for elem in root.iter():
+            if elem.text:
+                for placeholder, value in replacements.items():
+                    if placeholder in elem.text:
+                        elem.text = elem.text.replace(placeholder, value)
+        
+        tree.write(document_xml_path, encoding='UTF-8', xml_declaration=True)
+        
+        with zipfile.ZipFile(doc_path, 'w') as zip_ref:
+            for root_dir, _, files in os.walk(tmp_dir):
+                for file in files:
+                    file_path = os.path.join(root_dir, file)
+                    arcname = os.path.relpath(file_path, tmp_dir)
+                    zip_ref.write(file_path, arcname)
 
 async def generate_garbage_report(message: types.Message, state: FSMContext):
     """Генерация отчета на основе шаблона"""
@@ -299,22 +318,32 @@ async def generate_garbage_report(message: types.Message, state: FSMContext):
             await state.clear()
             return
             
-        doc = Document(template_path)
+        shutil.copy(template_path, doc_path)
         
+        # Замена текста в документе
         replacements = {
-            "<<DATE>>": data['date'],
+            "<<DATE>>": data.get('date', ''),
             "<<EQUIPMENT>>": data.get('equipment', ''),
             "<<GARBAGE_AMOUNT>>": data.get('garbage_amount', ''),
             "<<PARTICIPANTS>>": data.get('participants', ''),
             "<<HOURS>>": data.get('hours', '')
         }
         
-        for placeholder, value in replacements.items():
-            find_and_replace_text(doc, placeholder, value)
-        
         addresses = data['addresses']
         addresses_text = "\n".join(addresses)
-        find_and_replace_text(doc, "<<ADDRESSES>>", addresses_text)
+        replacements["<<ADDRESSES>>"] = addresses_text
+        
+        # Замена текста
+        try:
+            replace_text_in_docx(doc_path, replacements)
+        except Exception as e:
+            logger.error(f"Ошибка замены текста: {e}")
+            await message.answer("❌ Ошибка при обработке текста отчета")
+            await state.clear()
+            return
+        
+        # Загрузка документа для вставки фото
+        doc = Document(doc_path)
         
         # Обработка и вставка фотографий
         for i, address in enumerate(addresses):
