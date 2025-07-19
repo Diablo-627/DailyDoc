@@ -18,8 +18,8 @@ from docx import Document
 from docx.shared import Cm
 from docx.oxml import parse_xml
 from PIL import Image
-from datetime import datetime
 import xml.etree.ElementTree as ET
+import zipfile
 
 logger = logging.getLogger(__name__)
 garbage_router = Router()
@@ -49,33 +49,10 @@ async def start_garbage_report(message: types.Message, state: FSMContext):
         reply_markup=ReplyKeyboardRemove()
     )
 
-def normalize_date(date_str: str) -> str | None:
-    """Пытается привести дату к формату ДД.ММ.ГГГГ"""
-    formats = [
-        "%d.%m.%Y", "%d.%m.%y", "%d/%m/%Y", "%d/%m/%y", 
-        "%d-%m-%Y", "%d-%m-%y", "%Y.%m.%d", "%y.%m.%d",
-        "%d %m %Y", "%d %m %y", "%d/%m/%Y", "%d/%m/%y"
-    ]
-    
-    for fmt in formats:
-        try:
-            dt = datetime.strptime(date_str, fmt)
-            return dt.strftime("%d.%m.%Y")
-        except ValueError:
-            continue
-    return None
-
 @garbage_router.message(GarbageReportState.DATE)
 async def process_date(message: types.Message, state: FSMContext):
-    """Обработка даты"""
-    user_input = message.text.strip()
-    normalized_date = normalize_date(user_input)
-    
-    if not normalized_date:
-        await message.answer("❌ Неверный формат даты. Попробуйте снова (например: 19.07.2025)")
-        return
-        
-    await state.update_data(date=normalized_date)
+    """Обработка даты - принимаем любой текст"""
+    await state.update_data(date=message.text)
     await state.set_state(GarbageReportState.ADDRESSES)
     await message.answer(
         "🏠 Введите адреса (каждый адрес с новой строки):\n"
@@ -103,28 +80,28 @@ async def process_addresses(message: types.Message, state: FSMContext):
 
 @garbage_router.message(GarbageReportState.EQUIPMENT)
 async def process_equipment(message: types.Message, state: FSMContext):
-    """Обработка информации о технике"""
+    """Обработка информации о технике - принимаем любой текст"""
     await state.update_data(equipment=message.text)
     await state.set_state(GarbageReportState.GARBAGE_AMOUNT)
     await message.answer("🗑️ Введите количество вывезенного мусора (в тоннах):")
 
 @garbage_router.message(GarbageReportState.GARBAGE_AMOUNT)
 async def process_garbage_amount(message: types.Message, state: FSMContext):
-    """Обработка объема мусора"""
+    """Обработка объема мусора - принимаем любой текст"""
     await state.update_data(garbage_amount=message.text)
     await state.set_state(GarbageReportState.PARTICIPANTS)
     await message.answer("👥 Введите количество участников:")
 
 @garbage_router.message(GarbageReportState.PARTICIPANTS)
 async def process_participants(message: types.Message, state: FSMContext):
-    """Обработка количества участников"""
+    """Обработка количества участников - принимаем любой текст"""
     await state.update_data(participants=message.text)
     await state.set_state(GarbageReportState.HOURS)
     await message.answer("⏱️ Введите количество часов работы техники:")
 
 @garbage_router.message(GarbageReportState.HOURS)
 async def process_hours(message: types.Message, state: FSMContext):
-    """Обработка информации о часах работы"""
+    """Обработка информации о часах работы - принимаем любой текст"""
     await state.update_data(hours=message.text)
     data = await state.get_data()
     
