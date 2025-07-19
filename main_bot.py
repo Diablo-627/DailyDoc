@@ -5,12 +5,14 @@ from aiogram import Bot, Dispatcher, types
 from aiogram.filters import Command
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.storage.memory import MemoryStorage
+from aiogram.types import ReplyKeyboardRemove
 from aiogram.webhook.aiohttp_server import SimpleRequestHandler, setup_application
 from aiohttp import web
 
 # Import routers at top level to avoid circular imports
 from daily_report import daily_router, start_daily_report
 from garbage_report import garbage_router, start_garbage_report
+
 # Setup logging
 logging.basicConfig(
     level=logging.INFO,
@@ -25,12 +27,14 @@ storage = MemoryStorage()
 main_dp = Dispatcher(storage=storage)
 
 # Register routers
-main_dp.include_router(daily_router)  # Assuming these are defined in their modules
+main_dp.include_router(daily_router)
 main_dp.include_router(garbage_router)
 
 @main_dp.message(Command("start", "help"))
 async def start_command(message: types.Message, state: FSMContext):
     """Main menu with report type selection"""
+    await state.clear()  # Clear any previous state
+    
     keyboard = types.ReplyKeyboardMarkup(
         keyboard=[
             [types.KeyboardButton(text="📅 Ежедневный отчет")],
@@ -43,25 +47,34 @@ async def start_command(message: types.Message, state: FSMContext):
         "Выберите тип отчета:",
         reply_markup=keyboard
     )
-    await state.clear()
 
 @main_dp.message(lambda message: message.text == "📅 Ежедневный отчет")
 async def handle_daily_report(message: types.Message, state: FSMContext):
     """Handle daily report request"""
+    # Удаляем клавиатуру выбора отчёта
+    await message.answer(
+        "Запускаем ежедневный отчет...",
+        reply_markup=ReplyKeyboardRemove()
+    )
     await start_daily_report(message, state)
 
 @main_dp.message(lambda message: message.text == "🗑️ Отчет по вывозу мусора")
 async def handle_garbage_report(message: types.Message, state: FSMContext):
     """Handle garbage report request"""
+    # Удаляем клавиатуру выбора отчёта
+    await message.answer(
+        "Запускаем отчет по вывозу мусора...",
+        reply_markup=ReplyKeyboardRemove()
+    )
     await start_garbage_report(message, state)
 
-@main_dp.message(Command("cancel"))
-async def cancel_handler(message: types.Message, state: FSMContext):
-    """Cancel any ongoing operation"""
+@main_dp.message(Command("reset", "cancel"))
+async def reset_handler(message: types.Message, state: FSMContext):
+    """Reset any ongoing operation"""
     await state.clear()
     await message.answer(
-        "Действие отменено",
-        reply_markup=types.ReplyKeyboardRemove()
+        "Все действия отменены. Состояние сброшено.",
+        reply_markup=ReplyKeyboardRemove()
     )
 
 async def on_startup(app: web.Application):
