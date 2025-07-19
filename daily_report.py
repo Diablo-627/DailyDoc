@@ -254,7 +254,7 @@ async def start_daily_report(message: Message, state: FSMContext):
     await state.set_state(ReportState.fio)
     await message.answer("Введите ФИО координатора:")
 
-@router.message(Command("reset"))
+@daily_router.message(Command("reset"))
 async def reset_session(message: Message, state: FSMContext):
     """Сброс сессии"""
     chat_id = message.chat.id
@@ -279,7 +279,7 @@ async def reset_session(message: Message, state: FSMContext):
     await state.clear()
     await message.answer("Сессия сброшена. Введите /start для начала.")
 
-@router.message(Command("help"))
+@daily_router.message(Command("help"))
 async def help_handler(message: Message):
     """Обработчик команды /help"""
     help_text = (
@@ -291,7 +291,7 @@ async def help_handler(message: Message):
     )
     await message.answer(help_text)
 
-@router.message(Command("generate"))
+@daily_router.message(Command("generate"))
 async def generate_command(message: Message, state: FSMContext):
     """Команда для принудительной генерации отчета"""
     chat_id = message.chat.id
@@ -312,7 +312,7 @@ async def generate_command(message: Message, state: FSMContext):
     await generate_docx(message, chat_id, state)
 
 # Обработчики состояний
-@router.message(ReportState.fio)
+@daily_router.message(ReportState.fio)
 async def handle_fio(message: Message, state: FSMContext):
     chat_id = message.chat.id
     session = get_or_create_session(chat_id)
@@ -324,7 +324,7 @@ async def handle_fio(message: Message, state: FSMContext):
     await state.set_state(ReportState.team)
     await message.answer("Введите название отряда:")
 
-@router.message(ReportState.team)
+@daily_router.message(ReportState.team)
 async def handle_team(message: Message, state: FSMContext):
     chat_id = message.chat.id
     session = get_or_create_session(chat_id)
@@ -336,7 +336,7 @@ async def handle_team(message: Message, state: FSMContext):
     await state.set_state(ReportState.date)
     await message.answer("Введите дату уборки:")
 
-@router.message(ReportState.date)
+@daily_router.message(ReportState.date)
 async def handle_date(message: Message, state: FSMContext):
     chat_id = message.chat.id
     session = get_or_create_session(chat_id)
@@ -348,7 +348,7 @@ async def handle_date(message: Message, state: FSMContext):
     await state.set_state(ReportState.address)
     await message.answer("Введите адрес уборки:")
 
-@router.message(ReportState.address)
+@daily_router.message(ReportState.address)
 async def handle_address(message: Message, state: FSMContext):
     chat_id = message.chat.id
     session = get_or_create_session(chat_id)
@@ -360,7 +360,7 @@ async def handle_address(message: Message, state: FSMContext):
     await state.set_state(ReportState.bags)
     await message.answer("Введите количество мешков:")
 
-@router.message(ReportState.bags)
+@daily_router.message(ReportState.bags)
 async def handle_bags(message: Message, state: FSMContext):
     chat_id = message.chat.id
     session = get_or_create_session(chat_id)
@@ -372,7 +372,7 @@ async def handle_bags(message: Message, state: FSMContext):
     await state.set_state(ReportState.fighters)
     await message.answer("Введите количество бойцов:")
 
-@router.message(ReportState.fighters)
+@daily_router.message(ReportState.fighters)
 async def handle_fighters(message: Message, state: FSMContext):
     chat_id = message.chat.id
     session = get_or_create_session(chat_id)
@@ -385,7 +385,7 @@ async def handle_fighters(message: Message, state: FSMContext):
     await message.answer("Отправляйте фото. Для каждого будет запрошен тип.")
 
 # Обработчики фото
-@router.message(F.photo)
+@daily_router.message(F.photo)
 async def handle_photo_only(message: Message, state: FSMContext):
     """Обработчик фото (игнорирует подписи)"""
     chat_id = message.chat.id
@@ -463,7 +463,7 @@ async def process_next_photo(chat_id: int, state: FSMContext):
             session["current_file_id"] = None
             session["processing"] = False
 
-@router.callback_query(F.data.startswith("tag_"))
+@daily_router.callback_query(F.data.startswith("tag_"))
 async def handle_photo_tag(callback: CallbackQuery, state: FSMContext):
     """Обработчик выбора типа фото"""
     chat_id = callback.message.chat.id
@@ -557,7 +557,7 @@ async def handle_photo_tag(callback: CallbackQuery, state: FSMContext):
     await state.set_state(ReportState.input_photos)
 
 # Игнорирование текста (кроме команд)
-@router.message(F.text)
+@daily_router.message(F.text)
 async def ignore_text_messages(message: Message, state: FSMContext):
     """Игнорирует текст, если это не команда"""
     if not message.text.startswith('/'):
@@ -712,5 +712,3 @@ async def generate_docx(message: Message, chat_id: int, state: FSMContext):
         except Exception as e:
             logger.error(f"Ошибка очистки временных файлов: {e}")
 
-# Экспорт роутера
-router = router
