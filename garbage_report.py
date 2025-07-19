@@ -43,21 +43,14 @@ async def start_garbage_report(message: types.Message, state: FSMContext):
     await state.clear()
     await state.set_state(GarbageReportState.DATE)
     await message.answer(
-        "📅 Введите дату вывоза мусора (в формате ДД.ММ.ГГГГ):",
+        "📅 Введите дату вывоза мусора (любой формат, главное цифры):",
         reply_markup=ReplyKeyboardRemove()
     )
 
 @garbage_router.message(GarbageReportState.DATE)
 async def process_date(message: types.Message, state: FSMContext):
-    """Обработка даты (принимает любой формат)"""
-    user_input = message.text.strip()
-    
-    # Опционально: преобразование к формату ДД.ММ.ГГГГ (если нужно)
-    normalized_date = normalize_date(user_input)  # Функция приведена ниже
-    
-    await state.update_data(
-        date=normalized_date if normalized_date else user_input  # Сохраняем преобразованное или исходное
-    )
+    """Обработка даты (принимаем как есть)"""
+    await state.update_data(date=message.text.strip())
     await state.set_state(GarbageReportState.ADDRESSES)
     await message.answer(
         "🏠 Введите адреса (каждый адрес с новой строки):\n"
@@ -66,28 +59,7 @@ async def process_date(message: types.Message, state: FSMContext):
         "Пр. Мира, д. 15\n"
         "Ул. Центральная, д. 8"
     )
-
-def normalize_date(date_str: str) -> str | None:
-    """Пытается привести дату к формату ДД.ММ.ГГГГ (возвращает None при неудаче)"""
-    from datetime import datetime
-    
-    # Поддерживаемые форматы
-    formats = [
-        "%d.%m.%Y", "%d.%m.%y",  # 19.07.2025 / 19.07.25
-        "%d/%m/%Y", "%d/%m/%y",    # 19/07/2025 / 19/07/25
-        "%d-%m-%Y", "%d-%m-%y",    # 19-07-2025 / 19-07-25
-        "%Y.%m.%d", "%y.%m.%d"     # 2025.07.19 / 25.07.19 (обратный формат)
-    ]
-    
-    for fmt in formats:
-        try:
-            dt = datetime.strptime(date_str, fmt)
-            return dt.strftime("%d.%m.%Y")  # Единый формат
-        except ValueError:
-            continue
-    return None  # Не удалось распознать
-
-@garbage_router.message(GarbageReportState.ADDRESSES)
+    @garbage_router.message(GarbageReportState.ADDRESSES)
 async def process_addresses(message: types.Message, state: FSMContext):
     """Обработка списка адресов"""
     addresses = [addr.strip() for addr in message.text.split('\n') if addr.strip()]
@@ -223,6 +195,7 @@ async def download_and_process_photo(file_id: str, bot: Bot, target_width: float
         if img.mode != 'RGB':
             img = img.convert('RGB')
         
+        width, height = img.size
         target_width_px = int(target_width * CM_TO_PX)
         target_height_px = int(target_height * CM_TO_PX)
         
