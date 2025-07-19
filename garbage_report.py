@@ -18,6 +18,7 @@ from docx import Document
 from docx.shared import Cm
 from docx.oxml import parse_xml
 from PIL import Image
+from datetime import datetime
 
 logger = logging.getLogger(__name__)
 garbage_router = Router()
@@ -47,23 +48,8 @@ async def start_garbage_report(message: types.Message, state: FSMContext):
         reply_markup=ReplyKeyboardRemove()
     )
 
-@garbage_router.message(GarbageReportState.DATE)
-async def process_date(message: types.Message, state: FSMContext):
-    """Обработка даты (принимает любой формат)"""
-    user_input = message.text.strip()
-    await state.set_state(GarbageReportState.ADDRESSES)
-    await message.answer(
-        "🏠 Введите адреса (каждый адрес с новой строки):\n"
-        "Пример:\n"
-        "Ул. Ленина, д. 1\n"
-        "Пр. Мира, д. 15\n"
-        "Ул. Центральная, д. 8"
-    )
-
 def normalize_date(date_str: str) -> str | None:
     """Пытается привести дату к формату ДД.ММ.ГГГГ (возвращает None при неудаче)"""
-    from datetime import datetime
-    
     # Поддерживаемые форматы
     formats = [
         "%d.%m.%Y", "%d.%m.%y",  # 19.07.2025 / 19.07.25
@@ -79,6 +65,26 @@ def normalize_date(date_str: str) -> str | None:
         except ValueError:
             continue
     return None  # Не удалось распознать
+
+@garbage_router.message(GarbageReportState.DATE)
+async def process_date(message: types.Message, state: FSMContext):
+    """Обработка даты (принимает любой формат)"""
+    user_input = message.text.strip()
+    normalized_date = normalize_date(user_input)
+    
+    if not normalized_date:
+        await message.answer("❌ Неверный формат даты. Попробуйте снова (например: 19.07.2025)")
+        return
+        
+    await state.update_data(date=normalized_date)
+    await state.set_state(GarbageReportState.ADDRESSES)
+    await message.answer(
+        "🏠 Введите адреса (каждый адрес с новой строки):\n"
+        "Пример:\n"
+        "Ул. Ленина, д. 1\n"
+        "Пр. Мира, д. 15\n"
+        "Ул. Центральная, д. 8"
+    )
 
 @garbage_router.message(GarbageReportState.ADDRESSES)
 async def process_addresses(message: types.Message, state: FSMContext):
@@ -132,6 +138,12 @@ async def process_hours(message: types.Message, state: FSMContext):
         )
     )
 
+# Обработчик для не-фото в состоянии INPUT_PHOTOS
+@garbage_router.message(GarbageReportState.INPUT_PHOTOS, ~F.photo)
+async def handle_non_photo_input(message: types.Message):
+    """Обработка некорректного ввода (не фото)"""
+    await message.answer("❌ Пожалуйста, загрузите фото. Отправьте изображение как фото (не как файл)")
+
 @garbage_router.message(GarbageReportState.INPUT_PHOTOS, F.photo)
 async def process_photo_upload(message: types.Message, state: FSMContext):
     """Обработка загруженных фото"""
@@ -156,6 +168,11 @@ async def process_photo_upload(message: types.Message, state: FSMContext):
                 )
             ])
     
+    # Если все фото уже распределены (не должно происходить, но на всякий случай)
+    if not keyboard.inline_keyboard:
+        await message.answer("❌ Все фото уже распределены!")
+        return
+        
     await state.set_state(GarbageReportState.PHOTO_ASSIGNMENT)
     await message.answer(
         f"📎 Фото {photo_counter}/{total_photos}\n"
@@ -171,17 +188,22 @@ async def assign_photo_to_address(callback: types.CallbackQuery, state: FSMConte
     current_photo = data['current_photo']
     
     photos = data['photos'].copy()
-    photos[address].append(current_photo)
+    if address in photos and len(photos[address]) < 2:
+        photos[address].append(current_photo)
+    else:
+        await callback.answer("❌ Нельзя добавить больше 2 фото на адрес!")
+        return
+        
     photo_counter = data['photo_counter']
     total_photos = len(data['addresses']) * 2
     
     await state.update_data(photos=photos)
-    await callback.answer(f"Фото привязано к адресу: {address}")
+    await callback.answer(f"✅ Фото привязано к адресу: {address}")
     
     try:
         await callback.message.delete()
-    except:
-        pass
+    except Exception as e:
+        logger.error(f"Ошибка при удалении сообщения: {e}")
     
     if photo_counter >= total_photos:
         await generate_garbage_report(callback.message, state)
@@ -212,33 +234,44 @@ async def download_and_process_photo(file_id: str, bot: Bot, target_width: float
     file = await bot.get_file(file_id)
     photo_data = await bot.download_file(file.file_path)
     
-    with Image.open(photo_data) as img:
-        if img.mode != 'RGB':
-            img = img.convert('RGB')
+    with tempfile.NamedTemporaryFile(delete=False, suffix='.jpg') as temp_input:
+        # Сохраняем оригинальное фото
+        temp_input.write(photo_data.read())
+        temp_input.flush()
         
-        target_width_px = int(target_width * CM_TO_PX)
-        target_height_px = int(target_height * CM_TO_PX)
-        
-        scale = max(
-            target_width_px / width,
-            target_height_px / height
-        )
-        scaled_width = int(width * scale)
-        scaled_height = int(height * scale)
-        
-        img = img.resize((scaled_width, scaled_height), Image.LANCZOS)
-        left = (scaled_width - target_width_px) // 2
-        top = (scaled_height - target_height_px) // 2
-        img = img.crop((
-            left,
-            top,
-            left + target_width_px,
-            top + target_height_px
-        ))
-        
-        temp_file = tempfile.NamedTemporaryFile(delete=False, suffix='.jpg')
-        img.save(temp_file, format='JPEG', quality=95)
-        return temp_file.name
+        with Image.open(temp_input.name) as img:
+            if img.mode != 'RGB':
+                img = img.convert('RGB')
+            
+            target_width_px = int(target_width * CM_TO_PX)
+            target_height_px = int(target_height * CM_TO_PX)
+            
+            # Рассчитываем масштаб
+            width, height = img.size
+            scale = max(
+                target_width_px / width,
+                target_height_px / height
+            )
+            scaled_width = int(width * scale)
+            scaled_height = int(height * scale)
+            
+            # Масштабируем и обрезаем
+            img = img.resize((scaled_width, scaled_height), Image.LANCZOS)
+            left = (scaled_width - target_width_px) // 2
+            top = (scaled_height - target_height_px) // 2
+            img = img.crop((
+                max(0, left),
+                max(0, top),
+                min(scaled_width, left + target_width_px),
+                min(scaled_height, top + target_height_px)
+            ))
+            
+            temp_output = tempfile.NamedTemporaryFile(delete=False, suffix='.jpg')
+            img.save(temp_output, format='JPEG', quality=95)
+            temp_output.close()
+            
+            os.unlink(temp_input.name)
+            return temp_output.name
 
 def find_and_replace_text(doc, placeholder, replacement):
     """Поиск и замена текста в документе"""
@@ -283,32 +316,38 @@ async def generate_garbage_report(message: types.Message, state: FSMContext):
         addresses_text = "\n".join(addresses)
         find_and_replace_text(doc, "<<ADDRESSES>>", addresses_text)
         
+        # Обработка и вставка фотографий
         for i, address in enumerate(addresses):
             for j in range(2):
                 placeholder = f"<<PHOTO_{i+1}_{j+1}>>"
                 if j < len(data['photos'][address]):
                     file_id = data['photos'][address][j]
-                    photo_path = await download_and_process_photo(
-                        file_id, bot, PHOTO_WIDTH, PHOTO_HEIGHT
-                    )
-                    
-                    found = False
-                    for para in doc.paragraphs:
-                        if placeholder in para.text:
-                            para.text = ''
-                            run = para.add_run()
-                            run.add_picture(photo_path, width=Cm(PHOTO_WIDTH), height=Cm(PHOTO_HEIGHT))
-                            apply_photo_style(run)
-                            os.unlink(photo_path)
-                            found = True
-                            break
-                    
-                    if not found:
-                        logger.warning(f"Не найден плейсхолдер для фото: {placeholder}")
+                    try:
+                        photo_path = await download_and_process_photo(
+                            file_id, bot, PHOTO_WIDTH, PHOTO_HEIGHT
+                        )
+                        
+                        found = False
+                        for para in doc.paragraphs:
+                            if placeholder in para.text:
+                                para.text = para.text.replace(placeholder, '')
+                                run = para.add_run()
+                                run.add_picture(photo_path, width=Cm(PHOTO_WIDTH), height=Cm(PHOTO_HEIGHT))
+                                apply_photo_style(run)
+                                found = True
+                                break
+                        
+                        if not found:
+                            logger.warning(f"Не найден плейсхолдер для фото: {placeholder}")
+                        
+                        os.unlink(photo_path)
+                    except Exception as e:
+                        logger.error(f"Ошибка обработки фото: {e}")
+                        await message.answer(f"❌ Ошибка обработки фото для адреса {address}")
         
         doc.save(doc_path)
         await message.answer("✅ Отчет готов!")
-        await message.answer_document(FSInputFile(doc_path))
+        await message.answer_document(FSInputFile(doc_path, filename="Отчет_вывоза_мусора.docx"))
     
     await state.clear()
 
