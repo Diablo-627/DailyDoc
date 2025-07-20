@@ -115,28 +115,57 @@ async def process_hours(message: types.Message, state: FSMContext):
     )
 
 # Обработчик для не-фото в состоянии INPUT_PHOTOS
-@garbage_router.message(GarbageReportState.INPUT_PHOTOS, ~F.photo)
-async def handle_non_photo_input(message: types.Message):
-    """Обработка некорректного ввода (не фото)"""
-    await message.answer("❌ Пожалуйста, загрузите фото. Отправьте изображение как фото (не как файл)")
-
 @garbage_router.message(GarbageReportState.INPUT_PHOTOS, F.photo)
 async def process_photo_upload(message: types.Message, state: FSMContext):
-    """Обработка загруженных фото (игнорируем подписи)"""
+    """Обработка загруженных фото (поддержка нескольких фото за раз)"""
     data = await state.get_data()
     addresses = data['addresses']
-    photo_counter = data['photo_counter'] + 1
     total_photos = len(addresses) * 2
     
-    # Проверка на превышение лимита фото
-    if photo_counter > total_photos:
-        await message.answer(f"✅ Все {total_photos} фото уже загружены. Идет генерация отчета...")
+    # Получаем все загруженные фото
+    photos = message.photo
+    
+    # Если это альбом (несколько фото), сохраняем их во временное хранилище
+    if len(photos) > 1:
+        await state.update_data(
+            photo_buffer=[photo[-1].file_id for photo in photos],
+            processing_album=True
+        )
+        await message.answer("📸 Получено несколько фото. Начнем их распределение...")
+        await process_next_photo_from_buffer(message, state)
         return
     
+    # Обработка одного фото
     await state.update_data(
         current_photo=message.photo[-1].file_id,
-        photo_counter=photo_counter
+        photo_counter=data.get('photo_counter', 0) + 1
     )
+    await ask_photo_assignment(message, state)
+
+async def process_next_photo_from_buffer(message: types.Message, state: FSMContext):
+    """Обработка следующего фото из буфера"""
+    data = await state.get_data()
+    photo_buffer = data.get('photo_buffer', [])
+    
+    if not photo_buffer:
+        await state.update_data(processing_album=False)
+        await check_completion(message, state)
+        return
+    
+    current_photo = photo_buffer.pop(0)
+    await state.update_data(
+        current_photo=current_photo,
+        photo_buffer=photo_buffer,
+        photo_counter=data.get('photo_counter', 0) + 1
+    )
+    await ask_photo_assignment(message, state)
+
+async def ask_photo_assignment(message: types.Message, state: FSMContext):
+    """Запрос привязки фото к адресу"""
+    data = await state.get_data()
+    addresses = data['addresses']
+    photo_counter = data['photo_counter']
+    total_photos = len(addresses) * 2
     
     keyboard = InlineKeyboardMarkup(inline_keyboard=[])
     for address in addresses:
@@ -151,6 +180,7 @@ async def process_photo_upload(message: types.Message, state: FSMContext):
     
     if not keyboard.inline_keyboard:
         await message.answer("❌ Все фото уже распределены!")
+        await check_completion(message, state)
         return
         
     await state.set_state(GarbageReportState.PHOTO_ASSIGNMENT)
@@ -159,6 +189,21 @@ async def process_photo_upload(message: types.Message, state: FSMContext):
         "Выберите адрес для этого фото:",
         reply_markup=keyboard
     )
+
+async def check_completion(message: types.Message, state: FSMContext):
+    """Проверка завершения загрузки фото"""
+    data = await state.get_data()
+    total_photos = len(data['addresses']) * 2
+    
+    if data.get('photo_counter', 0) >= total_photos:
+        await generate_garbage_report(message, state)
+    else:
+        await state.set_state(GarbageReportState.INPUT_PHOTOS)
+        remaining = total_photos - data.get('photo_counter', 0)
+        await message.answer(
+            f"📸 Осталось загрузить {remaining} фото. "
+            "Можете отправить одно или несколько фото сразу."
+        )
 
 @garbage_router.callback_query(GarbageReportState.PHOTO_ASSIGNMENT, F.data.startswith("address_"))
 async def assign_photo_to_address(callback: types.CallbackQuery, state: FSMContext):
