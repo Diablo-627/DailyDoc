@@ -273,7 +273,7 @@ async def process_next_photo(chat_id: int, state: FSMContext):
         if session["photo_queue"]:
             await process_next_photo(chat_id, state)
 
-@router.callback_query(F.data.startswith("tag_"))
+@garbage_router.callback_query(F.data.startswith("tag_"))
 async def handle_photo_tag(callback: CallbackQuery, state: FSMContext):
     """Обработчик выбора типа фото"""
     chat_id = callback.message.chat.id
