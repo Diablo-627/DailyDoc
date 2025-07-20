@@ -33,6 +33,14 @@ daily_router = Router()
 PHOTO_SIZES = {
     "ТБ1": (10.4, 7.4),
     "ТБ2": (10.4, 7.4),
+    "ДО1": (10.4, 7.4),
+    "ДО2": (10.4, 7.4),
+    "ДО3": (10.4, 7.4),
+    "ДО4": (10.4, 7.4),
+    "ПОСЛЕ1": (10.4, 7.4),
+    "ПОСЛЕ2": (10.4, 7.4),
+    "ПОСЛЕ3": (10.4, 7.4),
+    "ПОСЛЕ4": (10.4, 7.4),
     "ПРОЦЕСС1": (10.4, 7.4),
     "ПРОЦЕСС2": (10.4, 7.4),
     "ПРОЦЕСС3": (10.4, 7.4),
@@ -178,10 +186,13 @@ async def process_next_photo(chat_id: int, state: FSMContext):
     bot = Bot.get_current()
 
     with session["lock"]:
+        # Проверяем, можно ли обрабатывать следующее фото
         if session.get("processing", False):
+            logger.debug("Уже идет обработка, пропускаем")
             return
 
         if not session["photo_queue"]:
+            logger.debug("Очередь фото пуста")
             return
 
         if len(session["photos"]) >= MAX_PHOTOS:
@@ -196,8 +207,8 @@ async def process_next_photo(chat_id: int, state: FSMContext):
             session["processing"] = False
             return
 
-        # Берем первое фото без удаления из очереди
-        session["current_file_id"] = session["photo_queue"][0]
+        # Берем следующее фото из очереди
+        session["current_file_id"] = session["photo_queue"].pop(0)  # УДАЛЯЕМ фото из очереди сразу
         session["processing"] = True
 
     try:
@@ -218,9 +229,8 @@ async def process_next_photo(chat_id: int, state: FSMContext):
     except Exception as e:
         logger.error(f"Ошибка отправки фото: {e}")
         with session["lock"]:
-            # Удаляем текущее фото из очереди при ошибке
-            if session["photo_queue"] and session["photo_queue"][0] == session["current_file_id"]:
-                session["photo_queue"].pop(0)
+            # Возвращаем фото в очередь при ошибке
+            session["photo_queue"].insert(0, session["current_file_id"])
             session["current_file_id"] = None
             session["processing"] = False
 
@@ -375,7 +385,8 @@ async def handle_photo_only(message: Message, state: FSMContext):
 
     await reset_session_timer(chat_id, state)
 
-    photo_file_ids = [photo.file_id for photo in message.photo]
+    # Берем только самое качественное фото (последнее в списке)
+    photo_file_id = message.photo[-1].file_id
 
     with session["lock"]:
         if len(session["photos"]) >= MAX_PHOTOS:
@@ -386,8 +397,8 @@ async def handle_photo_only(message: Message, state: FSMContext):
             await message.answer("⚠️ Все типы фото использованы! Используйте /generate для создания отчета")
             return
 
-        session["photo_queue"].extend(photo_file_ids)
-        logger.info(f"Добавлено {len(photo_file_ids)} фото в очередь. Всего в очереди: {len(session['photo_queue'])}")
+        session["photo_queue"].append(photo_file_id)
+        logger.info(f"Добавлено фото в очередь. Всего в очереди: {len(session['photo_queue'])}")
 
     # Запускаем обработку если не в процессе
     if not session.get("processing", False):
@@ -411,9 +422,7 @@ async def handle_photo_tag(callback: CallbackQuery, state: FSMContext):
         await callback.message.answer("⏭ Фото пропущено.")
 
         with session["lock"]:
-            # Удаляем текущее фото из очереди
-            if session["photo_queue"] and session["photo_queue"][0] == session["current_file_id"]:
-                session["photo_queue"].pop(0)
+            # Очищаем текущее фото
             session["current_file_id"] = None
             session["processing"] = False
             queue_not_empty = bool(session["photo_queue"])
@@ -429,8 +438,10 @@ async def handle_photo_tag(callback: CallbackQuery, state: FSMContext):
         await callback.answer("Фото уже обработано")
         return
 
-    photo_path = os.path.join(os.getcwd(), "photos", f"{chat_id}_{tag}.jpg")
-    os.makedirs(os.path.dirname(photo_path), exist_ok=True)
+    # Создаем директорию для фото
+    photos_dir = os.path.join(os.getcwd(), "photos")
+    os.makedirs(photos_dir, exist_ok=True)
+    photo_path = os.path.join(photos_dir, f"{chat_id}_{tag}.jpg")
 
     if await download_photo_with_retry(session["current_file_id"], photo_path, bot):
         width, height = PHOTO_SIZES.get(tag, PHOTO_SIZES["default"])
@@ -447,9 +458,7 @@ async def handle_photo_tag(callback: CallbackQuery, state: FSMContext):
         await callback.message.answer(f"✅ Фото сохранено как: {tag}")
 
         with session["lock"]:
-            # Удаляем текущее фото из очереди
-            if session["photo_queue"] and session["photo_queue"][0] == session["current_file_id"]:
-                session["photo_queue"].pop(0)
+            # Сохраняем путь к фото
             session["photos"][tag] = photo_path
             if tag in session["remaining_tags"]:
                 session["remaining_tags"].remove(tag)
@@ -465,9 +474,8 @@ async def handle_photo_tag(callback: CallbackQuery, state: FSMContext):
     else:
         await callback.message.answer("❌ Ошибка загрузки фото")
         with session["lock"]:
-            # Удаляем текущее фото из очереди
-            if session["photo_queue"] and session["photo_queue"][0] == session["current_file_id"]:
-                session["photo_queue"].pop(0)
+            # Возвращаем фото в очередь при ошибке
+            session["photo_queue"].insert(0, session["current_file_id"])
             session["current_file_id"] = None
             session["processing"] = False
             queue_not_empty = bool(session["photo_queue"])
@@ -562,9 +570,11 @@ async def generate_docx(message: Message, chat_id: int, state: FSMContext):
             await message.answer(f"Отсутствуют фото: {', '.join(missing_photos)}")
             return
 
+        # Заменяем изображения
         for tag, image_path in session["photos"].items():
             await replace_image_in_docx(output_path, tag, image_path)
 
+        # Заменяем текст
         with tempfile.TemporaryDirectory() as tmp_dir:
             with zipfile.ZipFile(output_path, "r") as zip_ref:
                 zip_ref.extractall(tmp_dir)
@@ -597,6 +607,7 @@ async def generate_docx(message: Message, chat_id: int, state: FSMContext):
 
         await bot.send_document(chat_id, FSInputFile(output_path), caption="Ваш отчет")
 
+        # Очищаем сессию
         with session_lock:
             if chat_id in user_sessions:
                 for tag, path in user_sessions[chat_id]["photos"].items():
