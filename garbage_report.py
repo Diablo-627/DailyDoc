@@ -284,7 +284,7 @@ def replace_text_in_docx(doc_path: str, replacements: dict):
 async def generate_garbage_report(message: types.Message, state: FSMContext):
     """Генерация отчета на основе шаблона"""
     data = await state.get_data()
-    bot = state.dispatcher.bot
+    bot = Bot.get_current()
     
     with tempfile.TemporaryDirectory() as temp_dir:
         doc_path = os.path.join(temp_dir, "Отчет_вывоза_мусора.docx")
