@@ -6,10 +6,11 @@ import shutil
 import tempfile
 import xml.etree.ElementTree as ET
 import zipfile
+import time
 from concurrent.futures import ThreadPoolExecutor
 from threading import Lock
 from asyncio import Semaphore
-from typing import Dict, List
+from typing import Dict, List, Tuple
 
 from aiogram import Bot, types, F, Router
 from aiogram.fsm.context import FSMContext
@@ -34,6 +35,7 @@ CM_TO_PX = 37.8      # 1 см ≈ 37.8 пикселей
 TEMPLATE_NAME = "template21.docx"
 MAX_ADDRESSES = 15
 PHOTOS_PER_ADDRESS = 2
+TOTAL_PHOTOS = 30
 PHOTO_SIZES = {
     "default": (PHOTO_WIDTH, PHOTO_HEIGHT)
 }
@@ -69,6 +71,7 @@ def get_or_create_session(chat_id: int) -> Dict:
                 "current_photo": None,
                 "lock": Lock(),
                 "processing": False,
+                "used_photo_tags": set(),
             }
         return user_sessions[chat_id]
 
@@ -112,7 +115,23 @@ async def process_date(message: types.Message, state: FSMContext):
 async def process_addresses(message: types.Message, state: FSMContext):
     chat_id = message.chat.id
     session = get_or_create_session(chat_id)
-    addresses = [addr.strip() for addr in message.text.split('\n') if addr.strip()]
+    raw_addresses = message.text.split('\n')
+    addresses = []
+    seen = set()
+    duplicates = []
+    
+    for addr in raw_addresses:
+        addr_clean = addr.strip()
+        if addr_clean:
+            if addr_clean in seen:
+                duplicates.append(addr_clean)
+            else:
+                seen.add(addr_clean)
+                addresses.append(addr_clean)
+    
+    if duplicates:
+        await message.answer(f"⚠️ Обнаружены повторяющиеся адреса: {', '.join(set(duplicates))}. Пожалуйста, введите уникальные адреса.")
+        return
     
     if len(addresses) > MAX_ADDRESSES:
         await message.answer(f"⚠️ Слишком много адресов! Максимум: {MAX_ADDRESSES}")
@@ -184,6 +203,14 @@ async def process_photo_upload(message: Message, state: FSMContext):
     photo_file_id = message.photo[-1].file_id
     
     with session["lock"]:
+        # Проверяем, не превысили ли лимит фото
+        total_uploaded = sum(len(photos) for photos in session["photos"].values())
+        max_photos = len(session["addresses"]) * PHOTOS_PER_ADDRESS
+        
+        if total_uploaded + len(session["photo_queue"]) + 1 > max_photos:
+            await message.answer(f"⚠️ Вы уже загрузили максимальное количество фото ({max_photos}).")
+            return
+            
         session["photo_queue"].append(photo_file_id)
     
     if not session.get("processing", False):
@@ -329,30 +356,42 @@ async def generate_garbage_report(chat_id: int, state: FSMContext):
         output_path = os.path.join(temp_dir, "Отчет_вывоза_мусора.docx")
         shutil.copy(template_path, output_path)
         
-        # Заменяем основные плейсхолдеры
+        # Подготовка текстовых замен
         replacements = {
             "<<DATE>>": session["date"],
             "<<EQUIPMENT>>": session["equipment"],
             "<<GARBAGE_AMOUNT>>": session["garbage_amount"],
             "<<PARTICIPANTS>>": session["participants"],
             "<<HOURS>>": session["hours"],
-            "<<ADDRESSES>>": "\n".join(session["addresses"])
         }
         
-        # Заменяем адреса и фото
-        for i, address in enumerate(session["addresses"]):
-            replacements[f"<<ADDRESS_{i+1}>>"] = address
-            
-            for j, photo_path in enumerate(session["photos"].get(address, [])[:PHOTOS_PER_ADDRESS]):
-                if os.path.exists(photo_path):
-                    await replace_image_in_docx(
-                        output_path, 
-                        f"<<PHOTO_{i+1}_{j+1}>>", 
-                        photo_path
-                    )
+        # Заполняем адреса (1-15) и очищаем неиспользованные
+        for i in range(1, MAX_ADDRESSES + 1):
+            key = f"<<ADDRESS_{i}>>"
+            if i <= len(session["addresses"]):
+                replacements[key] = session["addresses"][i-1]
+            else:
+                replacements[key] = ""
         
         # Заменяем текстовые плейсхолдеры
         await replace_text_in_docx(output_path, replacements)
+        
+        # Обработка фото
+        photo_counter = 1
+        for i, address in enumerate(session["addresses"]):
+            photos = session["photos"].get(address, [])
+            for j, photo_path in enumerate(photos[:PHOTOS_PER_ADDRESS]):
+                photo_tag = f"<<PHOTO_{photo_counter}>>"
+                if os.path.exists(photo_path):
+                    await replace_image_in_docx(output_path, photo_tag, photo_path)
+                    session["used_photo_tags"].add(photo_tag)
+                photo_counter += 1
+        
+        # Очищаем неиспользованные фото-метки
+        for i in range(1, TOTAL_PHOTOS + 1):
+            photo_tag = f"<<PHOTO_{i}>>"
+            if photo_tag not in session["used_photo_tags"]:
+                await clear_image_placeholder(output_path, photo_tag)
         
         # Отправляем документ
         await bot.send_document(
@@ -364,6 +403,80 @@ async def generate_garbage_report(chat_id: int, state: FSMContext):
     # Очищаем сессию
     await reset_session(chat_id)
     await state.clear()
+
+async def clear_image_placeholder(doc_path: str, image_tag: str):
+    """Удаляет изображение и его метку из документа DOCX по тегу"""
+    with tempfile.TemporaryDirectory() as tmp_dir:
+        with zipfile.ZipFile(doc_path, "r") as zip_ref:
+            zip_ref.extractall(tmp_dir)
+        
+        document_xml_path = os.path.join(tmp_dir, "word", "document.xml")
+        relationships_path = os.path.join(tmp_dir, "word", "_rels", "document.xml.rels")
+        
+        tree = ET.parse(document_xml_path)
+        root = tree.getroot()
+        
+        namespaces = {
+            "a": "http://schemas.openxmlformats.org/drawingml/2006/main",
+            "r": "http://schemas.openxmlformats.org/officeDocument/2006/relationships",
+            "pic": "http://schemas.openxmlformats.org/drawingml/2006/picture",
+            "wp": "http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing",
+        }
+        
+        for prefix, uri in namespaces.items():
+            ET.register_namespace(prefix, uri)
+        
+        found = False
+        r_id_to_remove = None
+        # Ищем изображение по тегу в описании
+        for pic in root.findall(".//pic:pic", namespaces):
+            nv_pr = pic.find("pic:nvPicPr/pic:cNvPr", namespaces)
+            if nv_pr is not None and nv_pr.get("descr") == image_tag:
+                # Найдем элемент blip, чтобы получить rId
+                blip = pic.find(".//a:blip", namespaces)
+                if blip is not None:
+                    r_id_to_remove = blip.get("{http://schemas.openxmlformats.org/officeDocument/2006/relationships}embed")
+                # Ищем родительский элемент w:drawing
+                parent = pic
+                while parent is not None:
+                    if parent.tag == "{http://schemas.openxmlformats.org/wordprocessingml/2006/main}drawing":
+                        grandparent = parent.getparent()
+                        if grandparent is not None:
+                            grandparent.remove(parent)
+                            found = True
+                        break
+                    parent = parent.getparent()
+                break  # удаляем только первый найденный (тег уникален)
+        
+        # Если нашли рисунок и r_id_to_remove, то удаляем связь и файл изображения
+        if found and r_id_to_remove is not None:
+            # Обрабатываем файл отношений
+            rel_tree = ET.parse(relationships_path)
+            rel_root = rel_tree.getroot()
+            rel_to_remove = None
+            for rel in rel_root.findall(".//{http://schemas.openxmlformats.org/package/2006/relationships}Relationship"):
+                if rel.get("Id") == r_id_to_remove:
+                    rel_to_remove = rel
+                    # Удаляем файл изображения
+                    image_filename = rel.get("Target")
+                    image_path = os.path.join(tmp_dir, "word", image_filename)
+                    if os.path.exists(image_path):
+                        os.remove(image_path)
+                    break
+            if rel_to_remove is not None:
+                rel_root.remove(rel_to_remove)
+                rel_tree.write(relationships_path, encoding="UTF-8", xml_declaration=True)
+        
+        # Сохраняем изменения в document.xml
+        tree.write(document_xml_path, encoding="UTF-8", xml_declaration=True)
+        
+        # Перепаковываем docx
+        with zipfile.ZipFile(doc_path, "w") as zip_ref:
+            for root_dir, _, files in os.walk(tmp_dir):
+                for file in files:
+                    file_path = os.path.join(root_dir, file)
+                    arcname = os.path.relpath(file_path, tmp_dir)
+                    zip_ref.write(file_path, arcname)
 
 async def replace_image_in_docx(doc_path: str, image_tag: str, new_image_path: str):
     """Замена изображения в DOCX по тегу"""
