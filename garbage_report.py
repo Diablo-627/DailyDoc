@@ -122,13 +122,14 @@ async def process_photo_upload(message: types.Message, state: FSMContext):
     addresses = data['addresses']
     total_photos = len(addresses) * 2
     
-    # Получаем все загруженные фото
-    photos = message.photo
+    # Получаем file_id самого большого варианта фото (последний в списке)
+    photo_file_ids = [photo.file_id for photo in message.photo]
+    largest_photo_id = photo_file_ids[-1]  # Берем последний (самый большой вариант)
     
-    # Если это альбом (несколько фото), сохраняем их во временное хранилище
-    if len(photos) > 1:
+    # Если несколько фото в одном сообщении (альбом)
+    if len(photo_file_ids) > 1:
         await state.update_data(
-            photo_buffer=[photo[-1].file_id for photo in photos],
+            photo_buffer=photo_file_ids,
             processing_album=True
         )
         await message.answer("📸 Получено несколько фото. Начнем их распределение...")
@@ -137,7 +138,7 @@ async def process_photo_upload(message: types.Message, state: FSMContext):
     
     # Обработка одного фото
     await state.update_data(
-        current_photo=message.photo[-1].file_id,
+        current_photo=largest_photo_id,
         photo_counter=data.get('photo_counter', 0) + 1
     )
     await ask_photo_assignment(message, state)
