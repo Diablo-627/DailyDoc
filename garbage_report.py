@@ -214,7 +214,7 @@ async def process_photo_upload(message: Message, state: FSMContext):
         session["photo_queue"].append(photo_file_id)
     
     if not session.get("processing", False):
-        await process_next_photo(chat_id, state, bot)
+        await process_next_photo(chat_id, state)
 
 async def process_next_photo(chat_id: int, state: FSMContext):
     """Обработка следующего фото в очереди"""
