@@ -196,7 +196,8 @@ async def process_next_photo(chat_id: int, state: FSMContext):
             session["processing"] = False
             return
 
-        session["current_file_id"] = session["photo_queue"].pop(0)
+        # Берем первое фото без удаления из очереди
+        session["current_file_id"] = session["photo_queue"][0]
         session["processing"] = True
 
     try:
@@ -217,9 +218,13 @@ async def process_next_photo(chat_id: int, state: FSMContext):
     except Exception as e:
         logger.error(f"Ошибка отправки фото: {e}")
         with session["lock"]:
+            # Удаляем текущее фото из очереди при ошибке
+            if session["photo_queue"] and session["photo_queue"][0] == session["current_file_id"]:
+                session["photo_queue"].pop(0)
             session["current_file_id"] = None
             session["processing"] = False
 
+        # Пробуем обработать следующее фото
         if session["photo_queue"]:
             await process_next_photo(chat_id, state)
 
@@ -384,7 +389,8 @@ async def handle_photo_only(message: Message, state: FSMContext):
         session["photo_queue"].extend(photo_file_ids)
         logger.info(f"Добавлено {len(photo_file_ids)} фото в очередь. Всего в очереди: {len(session['photo_queue'])}")
 
-    if len(photo_file_ids) > 0 and not session.get("processing", False):
+    # Запускаем обработку если не в процессе
+    if not session.get("processing", False):
         await process_next_photo(chat_id, state)
 
 @daily_router.callback_query(ReportState.choosing_tag, F.data.startswith("tag_"))
@@ -405,12 +411,14 @@ async def handle_photo_tag(callback: CallbackQuery, state: FSMContext):
         await callback.message.answer("⏭ Фото пропущено.")
 
         with session["lock"]:
+            # Удаляем текущее фото из очереди
+            if session["photo_queue"] and session["photo_queue"][0] == session["current_file_id"]:
+                session["photo_queue"].pop(0)
             session["current_file_id"] = None
             session["processing"] = False
-            # Сохраняем состояние очереди внутри блокировки
             queue_not_empty = bool(session["photo_queue"])
 
-        # Вызываем обработку вне блокировки
+        # Обрабатываем следующее фото
         if queue_not_empty:
             await process_next_photo(chat_id, state)
         elif session["remaining_tags"]:
@@ -439,15 +447,17 @@ async def handle_photo_tag(callback: CallbackQuery, state: FSMContext):
         await callback.message.answer(f"✅ Фото сохранено как: {tag}")
 
         with session["lock"]:
+            # Удаляем текущее фото из очереди
+            if session["photo_queue"] and session["photo_queue"][0] == session["current_file_id"]:
+                session["photo_queue"].pop(0)
             session["photos"][tag] = photo_path
             if tag in session["remaining_tags"]:
                 session["remaining_tags"].remove(tag)
             session["current_file_id"] = None
             session["processing"] = False
-            # Сохраняем состояние очереди внутри блокировки
             queue_not_empty = bool(session["photo_queue"])
 
-        # Важно: вызываем обработку следующего фото ВНЕ блокировки
+        # Обрабатываем следующее фото
         if queue_not_empty:
             await process_next_photo(chat_id, state)
         elif not session["remaining_tags"] or len(session["photos"]) >= MAX_PHOTOS:
@@ -455,11 +465,14 @@ async def handle_photo_tag(callback: CallbackQuery, state: FSMContext):
     else:
         await callback.message.answer("❌ Ошибка загрузки фото")
         with session["lock"]:
+            # Удаляем текущее фото из очереди
+            if session["photo_queue"] and session["photo_queue"][0] == session["current_file_id"]:
+                session["photo_queue"].pop(0)
             session["current_file_id"] = None
             session["processing"] = False
             queue_not_empty = bool(session["photo_queue"])
 
-        # Обработка следующего фото ВНЕ блокировки
+        # Обрабатываем следующее фото
         if queue_not_empty:
             await process_next_photo(chat_id, state)
 
