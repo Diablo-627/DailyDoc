@@ -327,42 +327,98 @@ def replace_text_in_docx(doc_path: str, replacements: dict):
                     zip_ref.write(file_path, arcname)
 
 async def generate_garbage_report(message: types.Message, state: FSMContext):
-    """Генерация отчета на основе шаблона"""
     data = await state.get_data()
     bot = Bot.get_current()
     
     with tempfile.TemporaryDirectory() as temp_dir:
         doc_path = os.path.join(temp_dir, "Отчет_вывоза_мусора.docx")
-        
         template_path = TEMPLATE_NAME
-        if not os.path.exists(template_path):
-            await message.answer(f"❌ Шаблон {TEMPLATE_NAME} не найден!")
-            await state.clear()
-            return
-            
         shutil.copy(template_path, doc_path)
         
-        # Замена текста в документе
+        # Основные замены
         replacements = {
             "<<DATE>>": data.get('date', ''),
             "<<EQUIPMENT>>": data.get('equipment', ''),
             "<<GARBAGE_AMOUNT>>": data.get('garbage_amount', ''),
             "<<PARTICIPANTS>>": data.get('participants', ''),
-            "<<HOURS>>": data.get('hours', '')
+            "<<HOURS>>": data.get('hours', ''),
+            "<<ADDRESSES>>": "\n".join(data['addresses'])
         }
         
-        addresses = data['addresses']
-        addresses_text = "\n".join(addresses)
-        replacements["<<ADDRESSES>>"] = addresses_text
-        
         # Замена текста
-        try:
-            replace_text_in_docx(doc_path, replacements)
-        except Exception as e:
-            logger.error(f"Ошибка замены текста: {e}")
-            await message.answer("❌ Ошибка при обработке текста отчета")
+        replace_text_in_docx(doc_path, replacements)
+        
+        # Загрузка документа
+        doc = Document(doc_path)
+        
+        # Находим секцию для дублирования
+        section_start = None
+        section_end = None
+        for i, para in enumerate(doc.paragraphs):
+            if "<<ADDRESS_SECTION>>" in para.text:
+                section_start = i
+            if "<<END_SECTION>>" in para.text and section_start is not None:
+                section_end = i
+                break
+        
+        if section_start is None or section_end is None:
+            await message.answer("❌ В шаблоне не найдены маркеры секций!")
             await state.clear()
             return
+        
+        # Удаляем маркеры секций
+        del doc.paragraphs[section_end]
+        del doc.paragraphs[section_start]
+        
+        # Копируем и вставляем секции для каждого адреса
+        template_paragraphs = list(doc.paragraphs[section_start:section_end])
+        
+        for i, address in enumerate(data['addresses']):
+            # Для первого адреса используем существующую секцию
+            if i > 0:
+                # Добавляем разрыв страницы перед новой секцией
+                doc.add_page_break()
+                
+                # Копируем шаблонные параграфы
+                for para in template_paragraphs:
+                    new_para = doc.add_paragraph()
+                    new_para.text = para.text
+                    new_para.style = para.style
+            
+            # Замена в текущей секции
+            start_idx = section_start if i == 0 else len(doc.paragraphs) - len(template_paragraphs)
+            
+            for j in range(start_idx, start_idx + len(template_paragraphs)):
+                para = doc.paragraphs[j]
+                if "<<CURRENT_ADDRESS>>" in para.text:
+                    para.text = para.text.replace("<<CURRENT_ADDRESS>>", address)
+                
+                # Вставка фото
+                for k in range(1, 3):
+                    placeholder = f"<<PHOTO_{k}>>"
+                    if placeholder in para.text:
+                        if k <= len(data['photos'][address]):
+                            try:
+                                photo_path = await download_and_process_photo(
+                                    data['photos'][address][k-1], 
+                                    bot,
+                                    PHOTO_WIDTH,
+                                    PHOTO_HEIGHT
+                                )
+                                para.text = para.text.replace(placeholder, "")
+                                run = para.add_run()
+                                run.add_picture(photo_path, width=Cm(PHOTO_WIDTH), height=Cm(PHOTO_HEIGHT))
+                                apply_photo_style(run)
+                                os.unlink(photo_path)
+                            except Exception as e:
+                                logger.error(f"Ошибка обработки фото: {e}")
+                                para.text = para.text.replace(placeholder, f"❌ Ошибка загрузки фото {k}")
+        
+        doc.save(doc_path)
+        await message.answer("✅ Отчет готов!")
+        await message.answer_document(FSInputFile(doc_path, filename="Отчет_вывоза_мусора.docx"))
+    
+    await state.clear()
         
         # Загрузка документа для вставки фото
         doc = Document(doc_path)
