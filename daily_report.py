@@ -331,7 +331,7 @@ async def handle_photo_only(message: Message, state: FSMContext):
     """Обработчик фото (игнорирует подписи)"""
     chat_id = message.chat.id
     session = get_or_create_session(chat_id)
-    bot = message.bot
+    bot = state.dispatcher.bot
     
     await reset_session_timer(chat_id, state)
     
