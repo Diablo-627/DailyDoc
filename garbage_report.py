@@ -216,52 +216,155 @@ async def process_photo_upload(message: Message, state: FSMContext):
     if not session.get("processing", False):
         await process_next_photo(chat_id, state, bot)
 
-async def process_next_photo(chat_id: int, state: FSMContext, bot: Bot):
+async def process_next_photo(chat_id: int, state: FSMContext):
     """Обработка следующего фото в очереди"""
     session = get_or_create_session(chat_id)
     
     with session["lock"]:
         if session.get("processing", False) or not session["photo_queue"]:
             return
-        
-        session["current_photo"] = session["photo_queue"].pop(0)
+            
+        # Проверяем, не превышен ли лимит фото
+        if len(session["photos"]) >= MAX_PHOTOS:
+            session["photo_queue"] = []
+            await bot.send_message(chat_id, f"⚠️ Достигнут лимит в {MAX_PHOTOS} фото! Используйте /generate")
+            return
+            
+        # Берем первое фото из очереди (не удаляя его)
+        session["current_file_id"] = session["photo_queue"][0]
         session["processing"] = True
+        
+        if not session["remaining_tags"]:
+            await bot.send_message(chat_id, "⚠️ Все типы фото использованы! Используйте /generate")
+            session["photo_queue"] = []
+            session["current_file_id"] = None
+            session["processing"] = False
+            return
     
-    # Получаем адреса, которым не хватает фото
-    addresses_needed = []
-    for addr in session["addresses"]:
-        if len(session["photos"].get(addr, [])) < PHOTOS_PER_ADDRESS:
-            count = len(session["photos"].get(addr, []))
-            addresses_needed.append((addr, f"{addr} ({count+1}/{PHOTOS_PER_ADDRESS})"))
+    # Показываем фото с кнопками выбора типа
+    buttons = [
+        [InlineKeyboardButton(text=tag, callback_data=f"tag_{tag}")] 
+        for tag in session["remaining_tags"]
+    ]
     
-    if not addresses_needed:
-        await bot.send_message(chat_id, "✅ Все фото распределены! Генерирую отчет...")
-        await generate_garbage_report(chat_id, state)
-        return
+    # Добавляем кнопку "Пропустить"
+    buttons.append([InlineKeyboardButton(text="⏭ Пропустить", callback_data="tag_skip")])
     
-    # Создаем клавиатуру с адресами
-    keyboard = []
-    for addr, text in addresses_needed:
-        keyboard.append([InlineKeyboardButton(text=text, callback_data=f"addr_{addr}")])
-    
-    markup = InlineKeyboardMarkup(inline_keyboard=keyboard)
+    markup = InlineKeyboardMarkup(inline_keyboard=buttons)
     
     try:
         await bot.send_photo(
             chat_id=chat_id,
-            photo=session["current_photo"],
-            caption="Выберите адрес для этого фото:",
+            photo=session["current_file_id"],
+            caption="Выберите тип этого фото или пропустите:",
             reply_markup=markup
         )
-        await state.set_state(GarbageReportState.ASSIGN_PHOTO)
+        await state.set_state(ReportState.choosing_tag)
     except Exception as e:
         logger.error(f"Ошибка отправки фото: {e}")
         with session["lock"]:
-            session["current_photo"] = None
+            # Удаляем текущее фото из очереди (которое не удалось отправить)
+            if session["photo_queue"]:
+                session["photo_queue"].pop(0)
+            session["current_file_id"] = None
             session["processing"] = False
         
+        # Продолжаем обработку следующего фото
         if session["photo_queue"]:
-            await process_next_photo(chat_id, state, bot)
+            await process_next_photo(chat_id, state)
+
+@router.callback_query(F.data.startswith("tag_"))
+async def handle_photo_tag(callback: CallbackQuery, state: FSMContext):
+    """Обработчик выбора типа фото"""
+    chat_id = callback.message.chat.id
+    session = get_or_create_session(chat_id)
+    tag = callback.data.replace("tag_", "")
+    
+    await reset_session_timer(chat_id, state)
+    
+    # Обработка пропуска фото
+    if tag == "skip":
+        try:
+            await callback.message.delete()
+        except:
+            pass
+        
+        await callback.message.answer("⏭ Фото пропущено.")
+        
+        with session["lock"]:
+            # Удаляем текущее фото из очереди
+            if session["photo_queue"]:
+                session["photo_queue"].pop(0)
+            session["current_file_id"] = None
+            session["processing"] = False
+        
+        # Продолжаем обработку следующего фото
+        if session["photo_queue"]:
+            await process_next_photo(chat_id, state)
+        else:
+            # Напоминаем о неиспользованных тегах
+            if session["remaining_tags"]:
+                await callback.message.answer(f"Остались невыбранные типы: {', '.join(session['remaining_tags'])}\nОтправьте фото или используйте /generate")
+        return
+    
+    # Обычная обработка выбора тега
+    if not session["current_file_id"]:
+        await callback.answer("Фото уже обработано")
+        return
+    
+    # Сохраняем фото
+    photo_path = os.path.join(PHOTOS_DIR, f"{chat_id}_{tag}.jpg")
+    if await download_photo_with_retry(session["current_file_id"], photo_path):
+        width, height = PHOTO_SIZES.get(tag, PHOTO_SIZES["default"])
+        
+        async with processing_semaphore:
+            loop = asyncio.get_running_loop()
+            await loop.run_in_executor(
+                executor,
+                resize_and_crop_image,
+                photo_path, width, height
+            )
+        
+        # Удаляем сообщение с фото и кнопками
+        try:
+            await callback.message.delete()
+        except Exception as e:
+            logger.error(f"Ошибка при удалении сообщения: {e}")
+        
+        # Отправляем подтверждение
+        await callback.message.answer(f"✅ Фото сохранено как: {tag}")
+        
+        with session["lock"]:
+            # Удаляем обработанное фото из очереди
+            if session["photo_queue"]:
+                session["photo_queue"].pop(0)
+            
+            session["photos"][tag] = photo_path
+            if tag in session["remaining_tags"]:
+                session["remaining_tags"].remove(tag)
+            session["current_file_id"] = None
+            session["processing"] = False
+        
+        # Продолжаем обработку следующего фото
+        if session["photo_queue"]:
+            await process_next_photo(chat_id, state)
+        elif not session["remaining_tags"] or len(session["photos"]) >= MAX_PHOTOS:
+            # Автоматическая генерация если все фото собраны
+            await generate_docx(callback.message, chat_id, state)
+    else:
+        # Ошибка загрузки
+        await callback.message.answer("❌ Ошибка загрузки фото")
+        with session["lock"]:
+            if session["photo_queue"]:
+                session["photo_queue"].pop(0)
+            session["current_file_id"] = None
+            session["processing"] = False
+        
+        # Продолжаем обработку
+        if session["photo_queue"]:
+            await process_next_photo(chat_id, state)
+
+    await state.set_state(ReportState.input_photos)
 
 @garbage_router.callback_query(GarbageReportState.ASSIGN_PHOTO, F.data.startswith("addr_"))
 async def assign_photo_to_address(callback: CallbackQuery, state: FSMContext):
