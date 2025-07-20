@@ -407,8 +407,11 @@ async def handle_photo_tag(callback: CallbackQuery, state: FSMContext):
         with session["lock"]:
             session["current_file_id"] = None
             session["processing"] = False
+            # Сохраняем состояние очереди внутри блокировки
+            queue_not_empty = bool(session["photo_queue"])
 
-        if session["photo_queue"]:
+        # Вызываем обработку вне блокировки
+        if queue_not_empty:
             await process_next_photo(chat_id, state)
         elif session["remaining_tags"]:
             await callback.message.answer(f"Остались невыбранные типы: {', '.join(session['remaining_tags'])}\nОтправьте фото или используйте /generate")
@@ -441,8 +444,11 @@ async def handle_photo_tag(callback: CallbackQuery, state: FSMContext):
                 session["remaining_tags"].remove(tag)
             session["current_file_id"] = None
             session["processing"] = False
+            # Сохраняем состояние очереди внутри блокировки
+            queue_not_empty = bool(session["photo_queue"])
 
-        if session["photo_queue"]:
+        # Важно: вызываем обработку следующего фото ВНЕ блокировки
+        if queue_not_empty:
             await process_next_photo(chat_id, state)
         elif not session["remaining_tags"] or len(session["photos"]) >= MAX_PHOTOS:
             await generate_docx(callback.message, chat_id, state)
@@ -451,8 +457,10 @@ async def handle_photo_tag(callback: CallbackQuery, state: FSMContext):
         with session["lock"]:
             session["current_file_id"] = None
             session["processing"] = False
+            queue_not_empty = bool(session["photo_queue"])
 
-        if session["photo_queue"]:
+        # Обработка следующего фото ВНЕ блокировки
+        if queue_not_empty:
             await process_next_photo(chat_id, state)
 
     await state.set_state(ReportState.input_photos)
