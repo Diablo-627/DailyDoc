@@ -351,26 +351,31 @@ def replace_image_in_docx_sync(tmp_dir: str, tag: str, new_path: str):
     tree.write(document_xml_path, encoding='UTF-8', xml_declaration=True)
 
 def remove_address_blocks_sync(tmp_dir: str, session: dict):
-    """Удаление страниц для адресов без фотографий"""
+    """Удаление страниц для адресов без фотографий с использованием lxml"""
     document_xml_path = os.path.join(tmp_dir, 'word', 'document.xml')
     relationships_path = os.path.join(tmp_dir, 'word', '_rels', 'document.xml.rels')
     
     if not os.path.exists(document_xml_path) or not os.path.exists(relationships_path):
         return
 
+    # Используем lxml вместо стандартного ElementTree
+    from lxml import etree
+    
     namespaces = {
-        'w': 'http://schemas.openxmlformats.org/wordprocessingml/2006/main',
-        'a': 'http://schemas.openxmlformats.org/drawingml/2006/main',
-        'r': 'http://schemas.openxmlformats.org/officeDocument/2006/relationships',
-        'wp': 'http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing',
-        'pic': 'http://schemas.openxmlformats.org/drawingml/2006/picture'
+        'w': "http://schemas.openxmlformats.org/wordprocessingml/2006/main",
+        'a': "http://schemas.openxmlformats.org/drawingml/2006/main",
+        'r': "http://schemas.openxmlformats.org/officeDocument/2006/relationships",
+        'wp': "http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing",
+        'pic': "http://schemas.openxmlformats.org/drawingml/2006/picture"
     }
-    for prefix, uri in namespaces.items():
-        ET.register_namespace(prefix, uri)
 
-    tree = ET.parse(document_xml_path)
+    # Парсим документ с помощью lxml
+    parser = etree.XMLParser(remove_blank_text=True)
+    tree = etree.parse(document_xml_path, parser)
     root = tree.getroot()
-    rel_tree = ET.parse(relationships_path)
+
+    # Парсим связи
+    rel_tree = etree.parse(relationships_path, parser)
     rel_root = rel_tree.getroot()
 
     # Собираем адреса без фотографий
@@ -380,8 +385,8 @@ def remove_address_blocks_sync(tmp_dir: str, session: dict):
             addresses_without_photos.append(i)
 
     # Собираем все элементы для удаления
-    elements_to_remove = []
-    rels_to_remove = []
+    elements_to_remove = set()
+    rels_to_remove = set()
     image_files_to_remove = set()
 
     # Находим блоки для удаления
@@ -394,32 +399,32 @@ def remove_address_blocks_sync(tmp_dir: str, session: dict):
         ]
         
         for tag in tags:
-            # Ищем в основном документе
-            for elem in root.findall('.//*'):
+            # Ищем текстовые элементы
+            for elem in root.xpath(".//w:t", namespaces=namespaces):
                 if elem.text and tag in elem.text:
                     # Находим родительский параграф
                     p = elem
-                    while p is not None and p.tag != '{http://schemas.openxmlformats.org/wordprocessingml/2006/main}p':
+                    while p is not None and p.tag != f"{{{namespaces['w']}}}p":
                         p = p.getparent()
-                    if p is not None and p not in elements_to_remove:
-                        elements_to_remove.append(p)
-                
-                # Ищем в описаниях изображений
-                if elem.tag == '{http://schemas.openxmlformats.org/drawingml/2006/picture}pic':
-                    nvPr = elem.find('.//pic:nvPicPr/pic:cNvPr', namespaces)
-                    if nvPr is not None and nvPr.get('descr') == tag:
-                        elements_to_remove.append(elem)
-                        
-                        # Находим связь изображения
-                        blip = elem.find('.//a:blip', namespaces)
-                        if blip is not None:
-                            r_id = blip.get('{' + namespaces['r'] + '}embed')
-                            if r_id:
-                                for rel in rel_root.findall('.//{http://schemas.openxmlformats.org/package/2006/relationships}Relationship'):
-                                    if rel.get('Id') == r_id:
-                                        rels_to_remove.append(rel)
-                                        image_path = os.path.join(tmp_dir, 'word', rel.get('Target'))
-                                        image_files_to_remove.add(image_path)
+                    if p is not None:
+                        elements_to_remove.add(p)
+            
+            # Ищем изображения
+            for pic in root.xpath(".//pic:pic", namespaces=namespaces):
+                nvPr = pic.xpath(".//pic:cNvPr", namespaces=namespaces)
+                if nvPr and nvPr[0].get("descr") == tag:
+                    elements_to_remove.add(pic)
+                    
+                    # Находим связь изображения
+                    blip = pic.xpath(".//a:blip", namespaces=namespaces)
+                    if blip:
+                        r_id = blip[0].get(f"{{{namespaces['r']}}}embed")
+                        if r_id:
+                            for rel in rel_root.xpath(".//rels:Relationship", namespaces={"rels": "http://schemas.openxmlformats.org/package/2006/relationships"}):
+                                if rel.get("Id") == r_id:
+                                    rels_to_remove.add(rel)
+                                    image_path = os.path.join(tmp_dir, 'word', rel.get("Target"))
+                                    image_files_to_remove.add(image_path)
 
     # Удаляем элементы из документа
     for elem in elements_to_remove:
@@ -441,8 +446,9 @@ def remove_address_blocks_sync(tmp_dir: str, session: dict):
         except Exception as e:
             logger.error(f"Ошибка удаления файла изображения: {e}")
 
-    tree.write(document_xml_path, encoding='UTF-8', xml_declaration=True)
-    rel_tree.write(relationships_path, encoding='UTF-8', xml_declaration=True)
+    # Сохраняем изменения
+    tree.write(document_xml_path, encoding="UTF-8", xml_declaration=True, pretty_print=True)
+    rel_tree.write(relationships_path, encoding="UTF-8", xml_declaration=True, pretty_print=True)
 
 async def generate_garbage_report(chat_id: int, state: FSMContext):
     """Генерация итогового отчета"""
