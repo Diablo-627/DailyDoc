@@ -6,6 +6,7 @@ import tempfile
 import xml.etree.ElementTree as ET
 import zipfile
 import time
+import re
 from concurrent.futures import ThreadPoolExecutor
 from threading import Lock
 from asyncio import Semaphore
@@ -349,21 +350,20 @@ def replace_image_in_docx_sync(tmp_dir: str, tag: str, new_path: str):
 
     tree.write(document_xml_path, encoding='UTF-8', xml_declaration=True)
 
-def clear_image_placeholder_sync(tmp_dir: str, tag: str):
-    """Синхронная очистка неиспользуемого плейсхолдера изображения"""
+def remove_address_blocks_sync(tmp_dir: str, session: dict):
+    """Удаление страниц для адресов без фотографий"""
     document_xml_path = os.path.join(tmp_dir, 'word', 'document.xml')
     relationships_path = os.path.join(tmp_dir, 'word', '_rels', 'document.xml.rels')
-
+    
     if not os.path.exists(document_xml_path) or not os.path.exists(relationships_path):
-        logger.error("document.xml or .rels not found")
         return
 
     namespaces = {
+        'w': 'http://schemas.openxmlformats.org/wordprocessingml/2006/main',
         'a': 'http://schemas.openxmlformats.org/drawingml/2006/main',
         'r': 'http://schemas.openxmlformats.org/officeDocument/2006/relationships',
-        'pic': 'http://schemas.openxmlformats.org/drawingml/2006/picture',
         'wp': 'http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing',
-        'w': 'http://schemas.openxmlformats.org/wordprocessingml/2006/main'
+        'pic': 'http://schemas.openxmlformats.org/drawingml/2006/picture'
     }
     for prefix, uri in namespaces.items():
         ET.register_namespace(prefix, uri)
@@ -373,48 +373,73 @@ def clear_image_placeholder_sync(tmp_dir: str, tag: str):
     rel_tree = ET.parse(relationships_path)
     rel_root = rel_tree.getroot()
 
-    paragraphs_to_remove = []
+    # Собираем адреса без фотографий
+    addresses_without_photos = []
+    for i, address in enumerate(session["addresses"], start=1):
+        if not session["photos"].get(address) or len(session["photos"][address]) == 0:
+            addresses_without_photos.append(i)
+
+    # Собираем все элементы для удаления
+    elements_to_remove = []
     rels_to_remove = []
-    image_files_to_remove = []
+    image_files_to_remove = set()
 
-    for pic in root.findall('.//pic:pic', namespaces):
-        nv_pr = pic.find('pic:nvPicPr/pic:cNvPr', namespaces)
-        if nv_pr is not None and nv_pr.get('descr') == tag:
-            p = pic
-            while p is not None and p.tag != '{http://schemas.openxmlformats.org/wordprocessingml/2006/main}p':
-                p = p.getparent()
+    # Находим блоки для удаления
+    for i in addresses_without_photos:
+        # Теги для этого блока
+        tags = [
+            f"<<ADDRESS_{i}>>",
+            f"<<PHOTO_{2*i-1}>>",
+            f"<<PHOTO_{2*i}>>"
+        ]
+        
+        for tag in tags:
+            # Ищем в основном документе
+            for elem in root.findall('.//*'):
+                if elem.text and tag in elem.text:
+                    # Находим родительский параграф
+                    p = elem
+                    while p is not None and p.tag != '{http://schemas.openxmlformats.org/wordprocessingml/2006/main}p':
+                        p = p.getparent()
+                    if p is not None and p not in elements_to_remove:
+                        elements_to_remove.append(p)
+                
+                # Ищем в описаниях изображений
+                if elem.tag == '{http://schemas.openxmlformats.org/drawingml/2006/picture}pic':
+                    nvPr = elem.find('.//pic:nvPicPr/pic:cNvPr', namespaces)
+                    if nvPr is not None and nvPr.get('descr') == tag:
+                        elements_to_remove.append(elem)
+                        
+                        # Находим связь изображения
+                        blip = elem.find('.//a:blip', namespaces)
+                        if blip is not None:
+                            r_id = blip.get('{' + namespaces['r'] + '}embed')
+                            if r_id:
+                                for rel in rel_root.findall('.//{http://schemas.openxmlformats.org/package/2006/relationships}Relationship'):
+                                    if rel.get('Id') == r_id:
+                                        rels_to_remove.append(rel)
+                                        image_path = os.path.join(tmp_dir, 'word', rel.get('Target'))
+                                        image_files_to_remove.add(image_path)
 
-            if p is not None:
-                paragraphs_to_remove.append(p)
-
-            blip = pic.find('.//a:blip', namespaces)
-            if blip is not None:
-                r_id = blip.get('{' + namespaces['r'] + '}embed')
-                if r_id:
-                    for rel in rel_root.findall('.//{http://schemas.openxmlformats.org/package/2006/relationships}Relationship'):
-                        if rel.get('Id') == r_id:
-                            rels_to_remove.append(rel)
-                            image_path_in_zip = rel.get('Target')
-                            full_image_path = os.path.join(tmp_dir, 'word', image_path_in_zip)
-                            if os.path.exists(full_image_path):
-                                image_files_to_remove.append(full_image_path)
-                            break
-
-    for p in paragraphs_to_remove:
-        parent = p.getparent()
+    # Удаляем элементы из документа
+    for elem in elements_to_remove:
+        parent = elem.getparent()
         if parent is not None:
-            parent.remove(p)
+            parent.remove(elem)
 
+    # Удаляем связи
     for rel in rels_to_remove:
         parent = rel.getparent()
         if parent is not None:
             parent.remove(rel)
 
+    # Удаляем файлы изображений
     for path in image_files_to_remove:
         try:
-            os.remove(path)
+            if os.path.exists(path):
+                os.remove(path)
         except Exception as e:
-            logger.error(f"Ошибка удаления файла {path}: {e}")
+            logger.error(f"Ошибка удаления файла изображения: {e}")
 
     tree.write(document_xml_path, encoding='UTF-8', xml_declaration=True)
     rel_tree.write(relationships_path, encoding='UTF-8', xml_declaration=True)
@@ -437,6 +462,9 @@ async def generate_garbage_report(chat_id: int, state: FSMContext):
         # Распаковываем шаблон
         with zipfile.ZipFile(out, 'r') as zip_ref:
             zip_ref.extractall(unpacked_dir)
+
+        # Удаляем блоки для адресов без фото
+        await asyncio.to_thread(remove_address_blocks_sync, unpacked_dir, session)
 
         # Подготавливаем текстовые замены
         reps = {
@@ -461,11 +489,6 @@ async def generate_garbage_report(chat_id: int, state: FSMContext):
                 tag = f"<<PHOTO_{cnt}>>"
                 await asyncio.to_thread(replace_image_in_docx_sync, unpacked_dir, tag, photo)
                 cnt += 1
-
-        # Очистка неиспользованных плейсхолдеров
-        for i in range(cnt, TOTAL_PHOTOS+1):
-            tag = f"<<PHOTO_{i}>>"
-            await asyncio.to_thread(clear_image_placeholder_sync, unpacked_dir, tag)
 
         # Перепаковываем документ
         with zipfile.ZipFile(out, 'w') as zip_ref:
