@@ -419,7 +419,7 @@ async def generate_garbage_report(message: types.Message, state: FSMContext):
         await message.answer("✅ Отчет готов!")
         await message.answer_document(FSInputFile(doc_path, filename="Отчет_вывоза_мусора.docx"))
     
-    await state.clear()
+        await state.clear()
         
         # Загрузка документа для вставки фото
         doc = Document(doc_path)
