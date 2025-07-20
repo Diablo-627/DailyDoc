@@ -401,7 +401,7 @@ async def handle_photo_tag(callback: CallbackQuery, state: FSMContext):
     """Обработчик выбора типа фото"""
     chat_id = callback.message.chat.id
     session = get_or_create_session(chat_id)
-    bot = callback.bot
+    bot = data['bot']
     tag = callback.data.replace("tag_", "")
     
     await reset_session_timer(chat_id, state)
