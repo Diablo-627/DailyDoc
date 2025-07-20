@@ -68,7 +68,7 @@ async def handle_garbage_report(message: types.Message, state: FSMContext):
     )
     await start_garbage_report(message, state)
 
-@main_dp.message(Command("reset", "cancel"))
+@main_dp.message(Command("stop", "cancel"))
 async def reset_handler(message: types.Message, state: FSMContext):
     """Reset any ongoing operation"""
     await state.clear()
