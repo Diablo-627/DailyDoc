@@ -4,6 +4,13 @@ import asyncio
 import logging
 import shutil
 import tempfile
+import xml.etree.ElementTree as ET
+import zipfile
+from concurrent.futures import ThreadPoolExecutor
+from threading import Lock
+from asyncio import Semaphore
+from typing import Dict, List
+
 from aiogram import Bot, types, F, Router
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
@@ -12,15 +19,10 @@ from aiogram.types import (
     FSInputFile,
     InlineKeyboardButton,
     InlineKeyboardMarkup,
-    ReplyKeyboardRemove
+    ReplyKeyboardRemove,
+    CallbackQuery
 )
-from docx import Document
-from docx.shared import Cm
-from docx.oxml import parse_xml
-from docx.enum.section import WD_SECTION
 from PIL import Image
-import xml.etree.ElementTree as ET
-import zipfile
 
 logger = logging.getLogger(__name__)
 garbage_router = Router()
@@ -29,9 +31,12 @@ garbage_router = Router()
 PHOTO_WIDTH = 13.33  # см
 PHOTO_HEIGHT = 7.5   # см
 CM_TO_PX = 37.8      # 1 см ≈ 37.8 пикселей
-TEMPLATE_NAME = "template21.docx"  # Название файла шаблона
-MAX_ADDRESSES = 15    # Максимальное количество адресов
-PHOTOS_PER_ADDRESS = 2 # Фото на каждый адрес
+TEMPLATE_NAME = "template21.docx"
+MAX_ADDRESSES = 15
+PHOTOS_PER_ADDRESS = 2
+PHOTO_SIZES = {
+    "default": (PHOTO_WIDTH, PHOTO_HEIGHT)
+}
 
 class GarbageReportState(StatesGroup):
     DATE = State()
@@ -41,10 +46,49 @@ class GarbageReportState(StatesGroup):
     PARTICIPANTS = State()
     HOURS = State()
     INPUT_PHOTOS = State()
-    PHOTO_ASSIGNMENT = State()
+    ASSIGN_PHOTO = State()
+
+# Глобальные переменные для управления сессиями
+user_sessions: Dict[int, Dict] = {}
+session_lock = Lock()
+executor = ThreadPoolExecutor(max_workers=3)
+processing_semaphore = Semaphore(3)
+
+def get_or_create_session(chat_id: int) -> Dict:
+    with session_lock:
+        if chat_id not in user_sessions:
+            user_sessions[chat_id] = {
+                "date": "",
+                "addresses": [],
+                "equipment": "",
+                "garbage_amount": "",
+                "participants": "",
+                "hours": "",
+                "photos": {},
+                "photo_queue": [],
+                "current_photo": None,
+                "lock": Lock(),
+                "processing": False,
+            }
+        return user_sessions[chat_id]
+
+async def reset_session(chat_id: int):
+    with session_lock:
+        if chat_id in user_sessions:
+            # Удаляем временные файлы фото
+            for address, photos in user_sessions[chat_id]["photos"].items():
+                for photo_path in photos:
+                    try:
+                        if os.path.exists(photo_path):
+                            os.remove(photo_path)
+                    except Exception as e:
+                        logger.error(f"Ошибка удаления фото: {e}")
+            del user_sessions[chat_id]
 
 async def start_garbage_report(message: types.Message, state: FSMContext):
     """Запуск сценария отчета по вывозу мусора"""
+    chat_id = message.chat.id
+    await reset_session(chat_id)
     await state.clear()
     await state.set_state(GarbageReportState.DATE)
     await message.answer(
@@ -52,217 +96,361 @@ async def start_garbage_report(message: types.Message, state: FSMContext):
         reply_markup=ReplyKeyboardRemove()
     )
 
-# [Остальные обработчики состояний остаются без изменений до process_hours]
+@garbage_router.message(GarbageReportState.DATE)
+async def process_date(message: types.Message, state: FSMContext):
+    chat_id = message.chat.id
+    session = get_or_create_session(chat_id)
+    with session["lock"]:
+        session["date"] = message.text
+    await state.set_state(GarbageReportState.ADDRESSES)
+    await message.answer(
+        "🏠 Введите адреса вывоза (каждый адрес с новой строки):\n"
+        f"Максимум: {MAX_ADDRESSES} адресов"
+    )
+
+@garbage_router.message(GarbageReportState.ADDRESSES)
+async def process_addresses(message: types.Message, state: FSMContext):
+    chat_id = message.chat.id
+    session = get_or_create_session(chat_id)
+    addresses = [addr.strip() for addr in message.text.split('\n') if addr.strip()]
+    
+    if len(addresses) > MAX_ADDRESSES:
+        await message.answer(f"⚠️ Слишком много адресов! Максимум: {MAX_ADDRESSES}")
+        return
+    
+    if not addresses:
+        await message.answer("⚠️ Нет адресов! Введите хотя бы один адрес")
+        return
+    
+    with session["lock"]:
+        session["addresses"] = addresses
+    
+    await state.set_state(GarbageReportState.EQUIPMENT)
+    await message.answer("🚛 Введите задействованную технику:")
+
+@garbage_router.message(GarbageReportState.EQUIPMENT)
+async def process_equipment(message: types.Message, state: FSMContext):
+    chat_id = message.chat.id
+    session = get_or_create_session(chat_id)
+    with session["lock"]:
+        session["equipment"] = message.text
+    await state.set_state(GarbageReportState.GARBAGE_AMOUNT)
+    await message.answer("🗑️ Введите количество вывезенного мусора (в тоннах):")
+
+@garbage_router.message(GarbageReportState.GARBAGE_AMOUNT)
+async def process_garbage_amount(message: types.Message, state: FSMContext):
+    chat_id = message.chat.id
+    session = get_or_create_session(chat_id)
+    with session["lock"]:
+        session["garbage_amount"] = message.text
+    await state.set_state(GarbageReportState.PARTICIPANTS)
+    await message.answer("👥 Введите количество участвовавших бойцов:")
+
+@garbage_router.message(GarbageReportState.PARTICIPANTS)
+async def process_participants(message: types.Message, state: FSMContext):
+    chat_id = message.chat.id
+    session = get_or_create_session(chat_id)
+    with session["lock"]:
+        session["participants"] = message.text
+    await state.set_state(GarbageReportState.HOURS)
+    await message.answer("⏱️ Введите часы работы техники (с учетом +1 часа на свалку):")
 
 @garbage_router.message(GarbageReportState.HOURS)
 async def process_hours(message: types.Message, state: FSMContext):
-    """Обработка информации о часах работы"""
-    await state.update_data(hours=message.text)
-    data = await state.get_data()
+    chat_id = message.chat.id
+    session = get_or_create_session(chat_id)
+    with session["lock"]:
+        session["hours"] = message.text
+        # Инициализируем структуру для фото
+        session["photos"] = {addr: [] for addr in session["addresses"]}
     
-    total_photos = len(data['addresses']) * PHOTOS_PER_ADDRESS
+    total_photos = len(session["addresses"]) * PHOTOS_PER_ADDRESS
     await state.set_state(GarbageReportState.INPUT_PHOTOS)
     await message.answer(
         f"📸 Теперь загрузите {total_photos} фото (по {PHOTOS_PER_ADDRESS} на каждый адрес).\n"
         f"Порядок адресов:\n" + "\n".join(
-            f"{i+1}. {addr}" for i, addr in enumerate(data['addresses'])
+            f"{i+1}. {addr}" for i, addr in enumerate(session["addresses"])
         )
     )
 
 @garbage_router.message(GarbageReportState.INPUT_PHOTOS, F.photo)
-async def process_photo_upload(message: types.Message, state: FSMContext):
-    """Обработка загруженных фото с поддержкой альбомов"""
-    data = await state.get_data()
+async def process_photo_upload(message: Message, state: FSMContext):
+    """Обработка загруженных фото"""
+    chat_id = message.chat.id
+    session = get_or_create_session(chat_id)
     bot = Bot.get_current()
     
-    # Получаем самый качественный вариант каждого фото
-    photo_file_ids = [photo.file_id for photo in message.photo]
+    # Берем самое качественное фото
+    photo_file_id = message.photo[-1].file_id
     
-    if len(photo_file_ids) > 1:
-        # Если это альбом, сохраняем фото в буфер
-        await state.update_data(photo_buffer=photo_file_ids)
-        await message.answer("📸 Получено несколько фото. Начнем обработку...")
-        await process_next_photo_from_buffer(message, state, bot)
-    else:
-        # Одно фото
-        await state.update_data(current_photo=photo_file_ids[0])
-        await ask_photo_assignment(message, state, bot)
+    with session["lock"]:
+        session["photo_queue"].append(photo_file_id)
+    
+    if not session.get("processing", False):
+        await process_next_photo(chat_id, state, bot)
 
-async def process_next_photo_from_buffer(message: Message, state: FSMContext, bot: Bot):
-    """Обработка следующего фото из буфера"""
-    data = await state.get_data()
-    photo_buffer = data.get('photo_buffer', [])
+async def process_next_photo(chat_id: int, state: FSMContext, bot: Bot):
+    """Обработка следующего фото в очереди"""
+    session = get_or_create_session(chat_id)
     
-    if not photo_buffer:
-        await check_completion(message, state)
-        return
-    
-    current_photo = photo_buffer.pop(0)
-    await state.update_data(
-        current_photo=current_photo,
-        photo_buffer=photo_buffer,
-        photo_counter=data.get('photo_counter', 0) + 1
-    )
-    await ask_photo_assignment(message, state, bot)
-
-async def ask_photo_assignment(message: Message, state: FSMContext, bot: Bot):
-    """Запрос привязки фото к адресу"""
-    data = await state.get_data()
-    addresses = data['addresses']
-    
-    # Создаем клавиатуру с адресами, которым еще нужны фото
-    keyboard = []
-    for address in addresses:
-        photo_count = len(data['photos'].get(address, []))
-        if photo_count < PHOTOS_PER_ADDRESS:
-            keyboard.append([
-                InlineKeyboardButton(
-                    text=f"{address} ({photo_count+1}/{PHOTOS_PER_ADDRESS})", 
-                    callback_data=f"address_{address}"
-                )
-            ])
-    
-    if not keyboard:
-        await message.answer("❌ Все фото уже распределены!")
-        await check_completion(message, state)
-        return
+    with session["lock"]:
+        if session.get("processing", False) or not session["photo_queue"]:
+            return
         
-    await state.set_state(GarbageReportState.PHOTO_ASSIGNMENT)
-    await message.answer(
-        "Выберите адрес для этого фото:",
-        reply_markup=InlineKeyboardMarkup(inline_keyboard=keyboard)
-    )
+        session["current_photo"] = session["photo_queue"].pop(0)
+        session["processing"] = True
+    
+    # Получаем адреса, которым не хватает фото
+    addresses_needed = []
+    for addr in session["addresses"]:
+        if len(session["photos"].get(addr, [])) < PHOTOS_PER_ADDRESS:
+            count = len(session["photos"].get(addr, []))
+            addresses_needed.append((addr, f"{addr} ({count+1}/{PHOTOS_PER_ADDRESS})"))
+    
+    if not addresses_needed:
+        await bot.send_message(chat_id, "✅ Все фото распределены! Генерирую отчет...")
+        await generate_garbage_report(chat_id, state)
+        return
+    
+    # Создаем клавиатуру с адресами
+    keyboard = []
+    for addr, text in addresses_needed:
+        keyboard.append([InlineKeyboardButton(text=text, callback_data=f"addr_{addr}")])
+    
+    markup = InlineKeyboardMarkup(inline_keyboard=keyboard)
+    
+    try:
+        await bot.send_photo(
+            chat_id=chat_id,
+            photo=session["current_photo"],
+            caption="Выберите адрес для этого фото:",
+            reply_markup=markup
+        )
+        await state.set_state(GarbageReportState.ASSIGN_PHOTO)
+    except Exception as e:
+        logger.error(f"Ошибка отправки фото: {e}")
+        with session["lock"]:
+            session["current_photo"] = None
+            session["processing"] = False
+        
+        if session["photo_queue"]:
+            await process_next_photo(chat_id, state, bot)
 
-@garbage_router.callback_query(GarbageReportState.PHOTO_ASSIGNMENT, F.data.startswith("address_"))
+@garbage_router.callback_query(GarbageReportState.ASSIGN_PHOTO, F.data.startswith("addr_"))
 async def assign_photo_to_address(callback: CallbackQuery, state: FSMContext):
     """Привязка фото к адресу"""
+    chat_id = callback.message.chat.id
     bot = Bot.get_current()
+    session = get_or_create_session(chat_id)
     address = callback.data.split("_", 1)[1]
-    data = await state.get_data()
     
-    # Обновляем данные о фото
-    photos = data['photos'].copy()
-    if address not in photos:
-        photos[address] = []
-    
-    if len(photos[address]) >= PHOTOS_PER_ADDRESS:
-        await callback.answer("❌ Нельзя добавить больше фото на этот адрес!")
+    if not session["current_photo"]:
+        await callback.answer("Фото уже обработано")
         return
     
-    photos[address].append(data['current_photo'])
-    await state.update_data(photos=photos)
+    # Создаем папку для фото, если ее нет
+    photos_dir = os.path.join(os.getcwd(), "garbage_photos")
+    os.makedirs(photos_dir, exist_ok=True)
     
-    await callback.answer(f"✅ Фото привязано к адресу: {address}")
+    # Скачиваем и обрабатываем фото
+    photo_path = os.path.join(photos_dir, f"{chat_id}_{address}_{int(time.time())}.jpg")
+    if await download_photo_with_retry(session["current_photo"], photo_path, bot):
+        width, height = PHOTO_SIZES["default"]
+        
+        async with processing_semaphore:
+            loop = asyncio.get_running_loop()
+            await loop.run_in_executor(executor, resize_and_crop_image, photo_path, width, height)
+        
+        with session["lock"]:
+            if address not in session["photos"]:
+                session["photos"][address] = []
+            session["photos"][address].append(photo_path)
+    
     await callback.message.delete()
+    await callback.answer(f"✅ Фото привязано к адресу: {address}")
     
-    # Проверяем завершение
-    total_photos = len(data['addresses']) * PHOTOS_PER_ADDRESS
-    current_count = sum(len(p) for p in photos.values())
+    with session["lock"]:
+        session["current_photo"] = None
+        session["processing"] = False
     
-    if current_count >= total_photos:
-        await generate_garbage_report(callback.message, state)
-    else:
-        await state.set_state(GarbageReportState.INPUT_PHOTOS)
-        await callback.message.answer(
-            f"✅ Фото {current_count}/{total_photos} сохранено. Отправьте следующее:"
-        )
+    # Обрабатываем следующее фото
+    await process_next_photo(chat_id, state, bot)
 
-async def generate_garbage_report(message: Message, state: FSMContext):
+async def download_photo_with_retry(file_id: str, destination_path: str, bot: Bot, max_attempts: int = 3) -> bool:
+    """Скачивание фото с повторами"""
+    for attempt in range(max_attempts):
+        try:
+            file = await bot.get_file(file_id)
+            await bot.download_file(file.file_path, destination_path)
+            return True
+        except Exception as e:
+            logger.error(f"Ошибка загрузки фото (попытка {attempt+1}): {e}")
+            if attempt < max_attempts - 1:
+                await asyncio.sleep(2)
+    return False
+
+def resize_and_crop_image(image_path: str, target_width_cm: float, target_height_cm: float):
+    """Изменение размера и обрезка фото"""
+    target_width_px = int(target_width_cm * CM_TO_PX)
+    target_height_px = int(target_height_cm * CM_TO_PX)
+    
+    with Image.open(image_path) as img:
+        if img.mode != "RGB":
+            img = img.convert("RGB")
+        
+        width, height = img.size
+        scale = max(
+            target_width_px / width,
+            target_height_px / height,
+        )
+        scaled_width = int(width * scale)
+        scaled_height = int(height * scale)
+        
+        img = img.resize((scaled_width, scaled_height), Image.LANCZOS)
+        left = (scaled_width - target_width_px) // 2
+        top = (scaled_height - target_height_px) // 2
+        img = img.crop((
+            left,
+            top,
+            left + target_width_px,
+            top + target_height_px,
+        ))
+        
+        img.save(image_path, format="JPEG", quality=95, subsampling=0)
+
+async def generate_garbage_report(chat_id: int, state: FSMContext):
     """Генерация итогового отчета"""
-    data = await state.get_data()
+    session = get_or_create_session(chat_id)
     bot = Bot.get_current()
     
     with tempfile.TemporaryDirectory() as temp_dir:
-        # Создаем временный файл отчета
-        doc_path = os.path.join(temp_dir, "Отчет_вывоза_мусора.docx")
-        shutil.copy(TEMPLATE_NAME, doc_path)
+        # Копируем шаблон
+        template_path = os.path.join(os.getcwd(), TEMPLATE_NAME)
+        output_path = os.path.join(temp_dir, "Отчет_вывоза_мусора.docx")
+        shutil.copy(template_path, output_path)
         
-        # Основные замены текста
+        # Заменяем основные плейсхолдеры
         replacements = {
-            "<<DATE>>": data.get('date', ''),
-            "<<EQUIPMENT>>": data.get('equipment', ''),
-            "<<GARBAGE_AMOUNT>>": data.get('garbage_amount', ''),
-            "<<PARTICIPANTS>>": data.get('participants', ''),
-            "<<HOURS>>": data.get('hours', ''),
-            "<<ADDRESSES>>": "\n".join(data['addresses'])
+            "<<DATE>>": session["date"],
+            "<<EQUIPMENT>>": session["equipment"],
+            "<<GARBAGE_AMOUNT>>": session["garbage_amount"],
+            "<<PARTICIPANTS>>": session["participants"],
+            "<<HOURS>>": session["hours"],
+            "<<ADDRESSES>>": "\n".join(session["addresses"])
         }
         
-        # Загружаем документ
-        doc = Document(doc_path)
-        
-        # Находим секцию-шаблон для адреса
-        template_section = None
-        for i, para in enumerate(doc.paragraphs):
-            if "<<ADDRESS_SECTION>>" in para.text:
-                template_section = i
-                break
-        
-        if template_section is None:
-            await message.answer("❌ В шаблоне не найдена секция для адресов!")
-            await state.clear()
-            return
-        
-        # Удаляем все существующие адресные секции после шаблона
-        for i in range(len(doc.paragraphs)-1, template_section, -1):
-            if "<<END_SECTION>>" in doc.paragraphs[i].text:
-                break
-            del doc.paragraphs[i]
-        
-        # Добавляем секции только для введенных адресов
-        for i, address in enumerate(data['addresses']):
-            if i > 0:
-                # Добавляем разрыв страницы для нового адреса
-                doc.add_section(WD_SECTION.NEW_PAGE)
+        # Заменяем адреса и фото
+        for i, address in enumerate(session["addresses"]):
+            replacements[f"<<ADDRESS_{i+1}>>"] = address
             
-            # Копируем шаблонную секцию
-            for para in doc.paragraphs[template_section+1:]:
-                if "<<END_SECTION>>" in para.text:
-                    break
-                
-                new_para = doc.add_paragraph(para.text)
-                new_para.style = para.style
-                
-                # Заменяем плейсхолдеры
-                if "<<CURRENT_ADDRESS>>" in new_para.text:
-                    new_para.text = new_para.text.replace("<<CURRENT_ADDRESS>>", address)
-                
-                # Вставляем фото
-                for photo_num in range(1, PHOTOS_PER_ADDRESS+1):
-                    placeholder = f"<<PHOTO_{photo_num}>>"
-                    if placeholder in new_para.text:
-                        if photo_num-1 < len(data['photos'][address]):
-                            try:
-                                photo_path = await download_and_process_photo(
-                                    data['photos'][address][photo_num-1],
-                                    bot,
-                                    PHOTO_WIDTH,
-                                    PHOTO_HEIGHT
-                                )
-                                new_para.text = new_para.text.replace(placeholder, "")
-                                run = new_para.add_run()
-                                run.add_picture(photo_path, width=Cm(PHOTO_WIDTH), height=Cm(PHOTO_HEIGHT))
-                                apply_photo_style(run)
-                                os.unlink(photo_path)
-                            except Exception as e:
-                                logger.error(f"Ошибка обработки фото: {e}")
-                                new_para.text = new_para.text.replace(placeholder, "[Ошибка загрузки фото]")
+            for j, photo_path in enumerate(session["photos"].get(address, [])[:PHOTOS_PER_ADDRESS]):
+                if os.path.exists(photo_path):
+                    await replace_image_in_docx(
+                        output_path, 
+                        f"<<PHOTO_{i+1}_{j+1}>>", 
+                        photo_path
+                    )
         
-        # Удаляем шаблонные маркеры
-        del doc.paragraphs[template_section]
-        for para in doc.paragraphs:
-            if "<<END_SECTION>>" in para.text:
-                para.text = para.text.replace("<<END_SECTION>>", "")
-                break
+        # Заменяем текстовые плейсхолдеры
+        await replace_text_in_docx(output_path, replacements)
         
-        # Сохраняем и отправляем отчет
-        doc.save(doc_path)
-        await message.answer("✅ Отчет готов!")
-        await message.answer_document(
-            FSInputFile(doc_path, filename="Отчет_вывоза_мусора.docx")
+        # Отправляем документ
+        await bot.send_document(
+            chat_id,
+            FSInputFile(output_path, filename="Отчет_вывоза_мусора.docx"),
+            caption="✅ Ваш отчет готов!"
         )
     
+    # Очищаем сессию
+    await reset_session(chat_id)
     await state.clear()
 
-# [Остальные вспомогательные функции остаются без изменений]
+async def replace_image_in_docx(doc_path: str, image_tag: str, new_image_path: str):
+    """Замена изображения в DOCX по тегу"""
+    with tempfile.TemporaryDirectory() as tmp_dir:
+        with zipfile.ZipFile(doc_path, "r") as zip_ref:
+            zip_ref.extractall(tmp_dir)
+        
+        document_xml_path = os.path.join(tmp_dir, "word", "document.xml")
+        relationships_path = os.path.join(tmp_dir, "word", "_rels", "document.xml.rels")
+        
+        tree = ET.parse(document_xml_path)
+        root = tree.getroot()
+        
+        namespaces = {
+            "a": "http://schemas.openxmlformats.org/drawingml/2006/main",
+            "r": "http://schemas.openxmlformats.org/officeDocument/2006/relationships",
+            "pic": "http://schemas.openxmlformats.org/drawingml/2006/picture",
+            "wp": "http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing",
+        }
+        
+        for prefix, uri in namespaces.items():
+            ET.register_namespace(prefix, uri)
+        
+        found = False
+        for pic in root.findall(".//pic:pic", namespaces):
+            nv_pr = pic.find("pic:nvPicPr/pic:cNvPr", namespaces)
+            if nv_pr is not None and nv_pr.get("descr") == image_tag:
+                blip = pic.find(".//a:blip", namespaces)
+                if blip is not None:
+                    r_id = blip.get("{http://schemas.openxmlformats.org/officeDocument/2006/relationships}embed")
+                    
+                    rel_tree = ET.parse(relationships_path)
+                    rel_root = rel_tree.getroot()
+                    
+                    for rel in rel_root.findall(".//{http://schemas.openxmlformats.org/package/2006/relationships}Relationship"):
+                        if rel.get("Id") == r_id:
+                            image_file = os.path.join(tmp_dir, "word", rel.get("Target"))
+                            shutil.copy(new_image_path, image_file)
+                            found = True
+                            break
+        
+        if not found:
+            logger.warning(f"Тег изображения {image_tag} не найден")
+        
+        tree.write(document_xml_path, encoding="UTF-8", xml_declaration=True)
+        
+        with zipfile.ZipFile(doc_path, "w") as zip_ref:
+            for root_dir, _, files in os.walk(tmp_dir):
+                for file in files:
+                    file_path = os.path.join(root_dir, file)
+                    arcname = os.path.relpath(file_path, tmp_dir)
+                    zip_ref.write(file_path, arcname)
+
+async def replace_text_in_docx(doc_path: str, replacements: Dict[str, str]):
+    """Замена текста в DOCX"""
+    with tempfile.TemporaryDirectory() as tmp_dir:
+        with zipfile.ZipFile(doc_path, "r") as zip_ref:
+            zip_ref.extractall(tmp_dir)
+        
+        document_xml_path = os.path.join(tmp_dir, "word", "document.xml")
+        
+        tree = ET.parse(document_xml_path)
+        root = tree.getroot()
+        
+        namespaces = {
+            "w": "http://schemas.openxmlformats.org/wordprocessingml/2006/main"
+        }
+        
+        # Ищем и заменяем текст
+        for elem in root.iter():
+            if elem.text:
+                for old, new in replacements.items():
+                    if old in elem.text:
+                        elem.text = elem.text.replace(old, new)
+            
+            if elem.tail:
+                for old, new in replacements.items():
+                    if old in elem.tail:
+                        elem.tail = elem.tail.replace(old, new)
+        
+        tree.write(document_xml_path, encoding="UTF-8", xml_declaration=True)
+        
+        with zipfile.ZipFile(doc_path, "w") as zip_ref:
+            for root_dir, _, files in os.walk(tmp_dir):
+                for file in files:
+                    file_path = os.path.join(root_dir, file)
+                    arcname = os.path.relpath(file_path, tmp_dir)
+                    zip_ref.write(file_path, arcname)
 
 __all__ = ['garbage_router', 'start_garbage_report']
