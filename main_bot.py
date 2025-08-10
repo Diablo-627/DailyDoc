@@ -1,7 +1,3 @@
-"""
-Главный файл запуска бота.
-Показывает меню выбора вида отчета и делегирует управление сценарию.
-"""
 import os
 import logging
 from dotenv import load_dotenv
@@ -37,10 +33,6 @@ dp = Dispatcher(storage=MemoryStorage())
 daily = DailyReport(bot=bot, template_path=TEMPLATE_DOCX, photos_dir=PHOTOS_DIR, temp_dir=TEMP_DIR)
 pickup = PickupReport(bot=bot, template_path=TEMPLATE_PICKUP, photos_dir=PHOTOS_DIR, temp_dir=TEMP_DIR)
 
-# подключаем роутеры сценариев
-dp.include_router(daily.router)
-dp.include_router(pickup.router)
-
 main_router = Router()
 
 @main_router.message(Command("start"))
@@ -57,7 +49,6 @@ async def handle_choice(callback: CallbackQuery):
     chat_id = callback.message.chat.id
 
     if data == "choose_daily":
-        # Автоматически стартуем Daily сценарий — он подготовит сессию и попросит ФИО
         await callback.message.answer("Вы выбрали: Ежедневный. Начинаем сценарий.")
         await daily.start_for_user(chat_id)
     else:
@@ -70,10 +61,10 @@ async def handle_choice(callback: CallbackQuery):
         pass
 
 dp.include_router(main_router)
+dp.include_router(daily.router)
+dp.include_router(pickup.router)
 
 if __name__ == "__main__":
-    # По умолчанию пока запускаем webhook сервер (как ранее).
-    # Для локального теста можно заменить на polling; скажите — я дам вариант.
     from aiogram.webhook.aiohttp_server import SimpleRequestHandler
 
     async def on_startup():
