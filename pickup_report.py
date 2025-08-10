@@ -1,7 +1,7 @@
-# pickup_report.py
 import os
 import logging
-from aiogram import Router
+from aiogram import Router, F
+from aiogram.filters import Command
 from aiogram.types import Message
 
 logger = logging.getLogger(__name__)
@@ -16,19 +16,15 @@ class PickupReport:
         os.makedirs(self.temp_dir, exist_ok=True)
         self.router = Router()
 
-        # простой /start в роутере, чтобы при тестах не было ошибок
-        @self.router.message("start")
+        # Обработчик команды /start в этом сценарии
+        @self.router.message(Command("start"))
         async def _local_start(message: Message):
             await message.answer(
                 "Вы в режиме 'Вывозной'.\n"
-                "Я пока что — упрощённый модуль. Для полноценной логики напишите, какие поля и теги нужны."
+                "Это упрощённый модуль — добавьте поля/теги и генерацию по примеру daily_report.py"
             )
 
     async def start_for_user(self, chat_id: int):
-        """
-        Вызывается из main_bot при выборе 'Вывозной'.
-        Сделаем простой ответ, чтобы не ломать запуск.
-        """
         try:
             await self.bot.send_message(chat_id, "Начинаем Вывозной отчет. Введите /start для запуска локального режима.")
         except Exception as e:
