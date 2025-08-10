@@ -1,19 +1,15 @@
 import os
 import asyncio
-import logging
+from datetime import datetime
+from concurrent.futures import ThreadPoolExecutor
 from aiogram import Router
 from aiogram.types import Message, CallbackQuery
 from aiogram.filters import Command
 from aiogram.utils.keyboard import InlineKeyboardMarkup, InlineKeyboardButton
-from concurrent.futures import ThreadPoolExecutor
 from docx import Document
 from PIL import Image
-from datetime import datetime
-
-logger = logging.getLogger(__name__)
 
 MAX_PHOTOS = 15
-
 PHOTO_SIZES = {
     "default": (800, 600)
 }
@@ -26,56 +22,76 @@ class DailyReport:
         self.temp_dir = temp_dir
         os.makedirs(self.photos_dir, exist_ok=True)
         os.makedirs(self.temp_dir, exist_ok=True)
+
         self.router = Router()
         self.sessions = {}
         self.executor = ThreadPoolExecutor(max_workers=4)
 
         self.router.message(Command("reset"))(self._reset_from_route)
         self.router.message(Command("help"))(self._help_from_route)
-        self.router.message(lambda msg: msg.photo)(self._handle_photo_only)
+        self.router.message(lambda m: m.photo)(self._handle_photo_only)
+        self.router.message(lambda m: m.text and m.text.strip())(self._handle_text)
         self.router.callback_query(lambda c: c.data.startswith("tag_"))(self._handle_photo_tag)
+
+        self.fields_order = [
+            "Название объекта", "Адрес", "Ответственный", "Дата"
+        ]
+        self.photo_tags = [f"PHOTO_{i}" for i in range(1, MAX_PHOTOS + 1)]
 
     def _get_or_create_session(self, chat_id: int):
         if chat_id not in self.sessions:
             self.sessions[chat_id] = {
-                "fields": {},
+                "fields": {field: "" for field in self.fields_order},
                 "photos": {},
                 "photo_queue": [],
-                "remaining_tags": [f"PHOTO_{i}" for i in range(1, MAX_PHOTOS+1)],
+                "remaining_tags": self.photo_tags.copy(),
                 "current_file_id": None,
                 "processing": False,
-                "state": "input_photos"
+                "state": "text_input",
+                "current_field_index": 0
             }
         return self.sessions[chat_id]
 
-    async def _reset_session_timer(self, chat_id: int):
-        # можно реализовать таймауты
-        pass
+    async def start_for_user(self, chat_id: int):
+        session = self._get_or_create_session(chat_id)
+        session["state"] = "text_input"
+        session["current_field_index"] = 0
+        await self.bot.send_message(chat_id, f"Введите: {self.fields_order[0]}")
 
     async def _reset_from_route(self, message: Message):
-        chat_id = message.chat.id
-        self.sessions.pop(chat_id, None)
+        self.sessions.pop(message.chat.id, None)
         await message.answer("Сессия сброшена. Начните заново через /start.")
 
     async def _help_from_route(self, message: Message):
-        await message.answer("Это сценарий ежедневного отчёта. Просто отправьте фото (максимум 15), бот сам сгенерирует документ.")
+        await message.answer("Ежедневный отчёт. Сначала вводите текстовые поля, потом отправляете фото (до 15 штук).")
 
-    async def start_for_user(self, chat_id: int):
-        await self.bot.send_message(chat_id, "Начинаем сценарий 'Ежедневный отчет'. Отправьте фото (до 15 штук).")
+    async def _handle_text(self, message: Message):
+        chat_id = message.chat.id
+        session = self._get_or_create_session(chat_id)
+
+        if session["state"] != "text_input":
+            return
+
+        field_name = self.fields_order[session["current_field_index"]]
+        session["fields"][field_name] = message.text.strip()
+        session["current_field_index"] += 1
+
+        if session["current_field_index"] < len(self.fields_order):
+            next_field = self.fields_order[session["current_field_index"]]
+            await message.answer(f"Введите: {next_field}")
+        else:
+            session["state"] = "photo_input"
+            await message.answer("Теперь отправьте фото (до 15 штук).")
 
     async def _handle_photo_only(self, message: Message):
         chat_id = message.chat.id
         session = self._get_or_create_session(chat_id)
-        await self._reset_session_timer(chat_id)
 
-        # Если сценарий завершён — игнорим
-        if session.get("state") is None:
-            await message.answer("Сценарий завершен. Начните заново через /start.")
+        if session["state"] != "photo_input":
             return
 
-        # Если уже есть 15 фото
         if len(session["photos"]) >= MAX_PHOTOS or not session["remaining_tags"]:
-            session["state"] = None
+            await message.answer("Все фото уже получены.")
             return
 
         session["photo_queue"].append(message.photo[-1].file_id)
@@ -100,9 +116,7 @@ class DailyReport:
         chat_id = callback.message.chat.id
         session = self._get_or_create_session(chat_id)
         tag = callback.data.replace("tag_", "")
-        await self._reset_session_timer(chat_id)
 
-        # Удаляем сообщение с кнопками
         try:
             await callback.message.delete()
         except:
@@ -116,27 +130,24 @@ class DailyReport:
                 await self._process_next_photo(chat_id)
             return
 
-        # Сохраняем фото
         photo_path = os.path.join(self.photos_dir, f"{chat_id}_{tag}.jpg")
         file = await self.bot.get_file(session["current_file_id"])
         await self.bot.download_file(file.file_path, photo_path)
+
         width, height = PHOTO_SIZES.get(tag, PHOTO_SIZES["default"])
         loop = asyncio.get_running_loop()
         await loop.run_in_executor(self.executor, self._resize_and_crop_image, photo_path, width, height)
+
         session["photos"][tag] = photo_path
         if tag in session["remaining_tags"]:
             session["remaining_tags"].remove(tag)
 
-        # Убираем из очереди
         session["photo_queue"].pop(0)
         session["current_file_id"] = None
         session["processing"] = False
 
-        # Проверка на завершение
         if len(session["photos"]) >= MAX_PHOTOS or not session["remaining_tags"]:
-            session["photo_queue"].clear()
-            session["state"] = None
-            await self._generate_docx(callback.message)
+            await self._generate_docx(chat_id)
             return
 
         if session["photo_queue"]:
@@ -147,27 +158,37 @@ class DailyReport:
         img = img.resize((width, height), Image.LANCZOS)
         img.save(path)
 
-    async def _generate_docx(self, message: Message):
-        chat_id = message.chat.id
+    async def _generate_docx(self, chat_id: int):
         session = self.sessions.get(chat_id)
         if not session:
-            await message.answer("Нет данных для генерации.")
             return
 
         doc = Document(self.template_path)
-        # Вставка фото в документ
+        for p in doc.paragraphs:
+            for field, value in session["fields"].items():
+                if f"{{{field}}}" in p.text:
+                    p.text = p.text.replace(f"{{{field}}}", value)
+
         for tag, path in session["photos"].items():
             for p in doc.paragraphs:
                 if f"{{{tag}}}" in p.text:
                     p.text = ""
                     run = p.add_run()
-                    run.add_picture(path, width=None, height=None)
+                    run.add_picture(path)
 
         output_path = os.path.join(self.temp_dir, f"report_{chat_id}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.docx")
         doc.save(output_path)
 
         await self.bot.send_document(chat_id, open(output_path, "rb"))
-        await message.answer("Отчет сгенерирован.")
+        await self.bot.send_message(chat_id, "Отчёт готов.")
 
-        # Завершаем сценарий
+        self._cleanup_files(session)
         session["state"] = None
+
+    def _cleanup_files(self, session):
+        for path in session["photos"].values():
+            try:
+                os.remove(path)
+            except:
+                pass
+        session["photos"].clear()
