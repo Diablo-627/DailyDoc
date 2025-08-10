@@ -17,4 +17,4 @@ RUN pip install --no-cache-dir --upgrade pip && \
 COPY . .
 
 EXPOSE 5000
-CMD ["python", DailyDoc.py.py"]
+CMD ["python", DailyDoc.py"]
