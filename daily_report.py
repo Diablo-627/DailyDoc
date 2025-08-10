@@ -150,27 +150,27 @@ class DailyReport:
             await message.answer("Непонятное состояние. /start для начала.")
 
     async def _handle_photo_only(self, message: Message):
-    chat_id = message.chat.id
-    session = self._get_or_create_session(chat_id)
-    await self._reset_session_timer(chat_id)
+        chat_id = message.chat.id
+        session = self._get_or_create_session(chat_id)
+        await self._reset_session_timer(chat_id)
 
-    # Если сценарий уже завершён
-    if session.get("state") is None:
-        await message.answer("Сценарий завершен. Начните заново через /start")
+        # Если сценарий уже завершён
+        if session.get("state") is None:
+            await message.answer("Сценарий завершен. Начните заново через /start")
         return
 
-    if session.get("state") != "input_photos":
-        await message.answer("Сначала заполните текстовые поля.")
+        if session.get("state") != "input_photos":
+            await message.answer("Сначала заполните текстовые поля.")
         return
 
     # Если уже есть 15 фото
-    if len(session["photos"]) >= MAX_PHOTOS or not session["remaining_tags"]:
-        session["state"] = None
+        if len(session["photos"]) >= MAX_PHOTOS or not session["remaining_tags"]:
+            session["state"] = None
         return
 
     session["photo_queue"].append(message.photo[-1].file_id)
-    if len(session["photo_queue"]) == 1:
-        await self._process_next_photo(chat_id)
+        if len(session["photo_queue"]) == 1:
+            await self._process_next_photo(chat_id)
 
 
     async def _process_next_photo(self, chat_id: int):
@@ -185,50 +185,50 @@ class DailyReport:
         await self.bot.send_photo(chat_id=chat_id, photo=session["current_file_id"], caption="Выберите тип фото:", reply_markup=markup)
 
     async def _handle_photo_tag(self, callback: CallbackQuery):
-    chat_id = callback.message.chat.id
-    session = self._get_or_create_session(chat_id)
-    tag = callback.data.replace("tag_", "")
-    await self._reset_session_timer(chat_id)
+        chat_id = callback.message.chat.id
+        session = self._get_or_create_session(chat_id)
+        tag = callback.data.replace("tag_", "")
+        await self._reset_session_timer(chat_id)
 
     # Удаляем сообщение с кнопками
-    try:
-        await callback.message.delete()
-    except:
-        pass
+        try:
+            await callback.message.delete()
+        except:
+            pass
 
-    if tag == "skip":
+        if tag == "skip":
+            session["photo_queue"].pop(0)
+            session["current_file_id"] = None
+            session["processing"] = False
+            if session["photo_queue"]:
+                await self._process_next_photo(chat_id)
+            return
+
+    # Сохраняем фото
+        photo_path = os.path.join(self.photos_dir, f"{chat_id}_{tag}.jpg")
+        file = await self.bot.get_file(session["current_file_id"])
+        await self.bot.download_file(file.file_path, photo_path)
+        width, height = PHOTO_SIZES.get(tag, PHOTO_SIZES["default"])
+        loop = asyncio.get_running_loop()
+        await loop.run_in_executor(self.executor, self._resize_and_crop_image, photo_path, width, height)
+        session["photos"][tag] = photo_path
+        if tag in session["remaining_tags"]:
+            session["remaining_tags"].remove(tag)
+
+    # Убираем из очереди
         session["photo_queue"].pop(0)
         session["current_file_id"] = None
         session["processing"] = False
-        if session["photo_queue"]:
-            await self._process_next_photo(chat_id)
-        return
-
-    # Сохраняем фото
-    photo_path = os.path.join(self.photos_dir, f"{chat_id}_{tag}.jpg")
-    file = await self.bot.get_file(session["current_file_id"])
-    await self.bot.download_file(file.file_path, photo_path)
-    width, height = PHOTO_SIZES.get(tag, PHOTO_SIZES["default"])
-    loop = asyncio.get_running_loop()
-    await loop.run_in_executor(self.executor, self._resize_and_crop_image, photo_path, width, height)
-    session["photos"][tag] = photo_path
-    if tag in session["remaining_tags"]:
-        session["remaining_tags"].remove(tag)
-
-    # Убираем из очереди
-    session["photo_queue"].pop(0)
-    session["current_file_id"] = None
-    session["processing"] = False
 
     # Проверка на завершение
-    if len(session["photos"]) >= MAX_PHOTOS or not session["remaining_tags"]:
-        session["photo_queue"].clear()
-        session["state"] = None
-        await self._generate_docx(callback.message)
-        return
+        if len(session["photos"]) >= MAX_PHOTOS or not session["remaining_tags"]:
+            session["photo_queue"].clear()
+            session["state"] = None
+            await self._generate_docx(callback.message)
+            return
 
-    if session["photo_queue"]:
-        await self._process_next_photo(chat_id)
+        if session["photo_queue"]:
+            await self._process_next_photo(chat_id)
 
     def _resize_and_crop_image(self, image_path, target_w_cm, target_h_cm):
         CM_TO_PX = 37.8
@@ -301,4 +301,5 @@ class DailyReport:
                     for file in files:
                         zip_ref.write(os.path.join(root, file), os.path.relpath(os.path.join(root, file), tmp_dir))
         await self.bot.send_document(chat_id, FSInputFile(output_path), caption="Ваш отчет готов")
+
 
